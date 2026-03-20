@@ -1,0 +1,40 @@
+# ── Entornos virtuales ────────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── Python cache ─────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# ── Wheels precompilados (se instalan via PyPI en el build; no copiar al contexto)
+*.whl
+
+# ── Outputs de benchmarks / eval ─────────────────────────────────────────────
+*.json
+*.txt
+*.png
+*.pdf
+
+# ── Git ───────────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+
+# ── Datos grandes (montar como volumen en runtime) ───────────────────────────
+data/
+datasets/
+checkpoints/
+*.pt
+*.safetensors
+*.bin
+
+# ── Logs y tmp ────────────────────────────────────────────────────────────────
+logs/
+wandb/
+runs/
+tmp/
+*.log
+bus_pid.txt

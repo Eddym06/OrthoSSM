@@ -1,0 +1,57 @@
+=== NativeLandmarkArchive test ===
+  Archive call 1: ARCHIVADO
+  Archive call 2: ARCHIVADO
+  Archive call 3: ARCHIVADO
+  Info: {'n_landmarks': 3, 'max_landmarks': 64, 'landmark_dim': 128, 'cache_valid': False, 'memory_kb': 1.5}
+Traceback (most recent call last):
+  File "/home/OrthoSSM/venv/lib/python3.12/site-packages/triton/language/core.py", line 35, in wrapper
+    return fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/OrthoSSM/venv/lib/python3.12/site-packages/triton/language/core.py", line 1534, in dot
+    return semantic.dot(input, other, acc, input_precision, max_num_imprecise_acc, out_dtype, _builder)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/OrthoSSM/venv/lib/python3.12/site-packages/triton/language/semantic.py", line 1370, in dot
+    assert lhs.shape[-2].value >= 16 and lhs.shape[-1].value >= 16 \
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: All non-batch values in both first input shape ([constexpr[4], constexpr[128]]) and second input shape ([constexpr[128], constexpr[4]]) must be >= 16!
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/OrthoSSM/chimera_experiment/landmark_native.py", line 309, in <module>
+    enriched = archive.retrieve(scan_out)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/OrthoSSM/chimera_experiment/landmark_native.py", line 234, in retrieve
+    lm      = self._get_processed_landmarks(device)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/OrthoSSM/chimera_experiment/landmark_native.py", line 206, in _get_processed_landmarks
+    sa_out = diff_attn_v2_triton(Q1, Q2, K1, K2, V, lam)  # [n, lm_dim]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/OrthoSSM/chimera_experiment/sgr_slr.py", line 126, in diff_attn_v2_triton
+    _diff_attn_v2_fwd_kernel[(triton.cdiv(K_size, BK),)](
+  File "/home/OrthoSSM/venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 345, in <lambda>
+    return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/OrthoSSM/venv/lib/python3.12/site-packages/triton/runtime/jit.py", line 662, in run
+    kernel = self.compile(
+             ^^^^^^^^^^^^^
+  File "/home/OrthoSSM/venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 276, in compile
+    module = src.make_ir(options, codegen_fns, context)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/OrthoSSM/venv/lib/python3.12/site-packages/triton/compiler/compiler.py", line 113, in make_ir
+    return ast_to_ttir(self.fn, self, context=context, options=options, codegen_fns=codegen_fns)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+triton.compiler.errors.CompilationError: at 53:13:
+    for w_start in range(0, W_size, BLOCK_W):
+        w_offs = w_start + tl.arange(0, BLOCK_W)
+        w_mask = w_offs < W_size
+
+        K1t = tl.load(K1_ptr + w_offs[:, None] * d_head + d_offs[None, :],
+                      mask=w_mask[:, None], other=0.0)
+        K2t = tl.load(K2_ptr + w_offs[:, None] * d_head + d_offs[None, :],
+                      mask=w_mask[:, None], other=0.0)
+        Vt  = tl.load(V_ptr  + w_offs[:, None] * d_head + d_offs[None, :],
+                      mask=w_mask[:, None], other=0.0)
+
+        s1 = tl.dot(Q1, tl.trans(K1t)) * scale
+             ^

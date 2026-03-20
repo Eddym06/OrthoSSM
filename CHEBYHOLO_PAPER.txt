@@ -1,0 +1,951 @@
+================================================================================
+ChebyHolo: Spectral Holographic Context Compression
+for Long-Sequence State Space Models
+================================================================================
+
+Authors:  OrthoSSM Research
+Venue:    Target: NeurIPS 2026 (Paper I) / ICLR 2027 (Paper II)
+Status:   Theoretical proposal — experimental validation pending
+Version:  1.0 — March 2026
+--------------------------------------------------------------------------------
+
+ABSTRACT
+--------
+Current context compression methods for long-sequence language models fall into
+two families: (1) recurrent SSMs that compress context via exponential state
+decay, irreversibly losing information not captured by learned gates; and
+(2) discrete landmark systems that snapshot K key moments, suffering from
+garbage collection boundaries and continuous-trajectory blind spots. We propose
+ChebyHolo, a spectral holographic compression framework that treats the
+temporal trajectory of hidden states as a continuous function and represents
+it via Chebyshev polynomial coefficients bound into a fixed-size holographic
+memory vector using Vector Symbolic Architecture (VSA). Our key contributions
+are: (i) the Spectral Smoothness of Semantic Trajectories (SSST) hypothesis,
+which predicts power-law decay ||c_k|| ~ k^{-β} for hidden-state Chebyshev
+spectra; (ii) a VSA binding scheme with O(1) memory cost per layer regardless
+of context length; (iii) complex DFT roles enabling phase-aware rotational
+geometry; and (iv) the spectral importance signal Δ_k, which quantifies
+semantic complexity by comparing Chebyshev coefficient vectors across temporal
+windows, providing a per-frequency-band importance proxy that replaces indirect
+TTT-error signals. We derive interference bounds, reconstruction guarantees,
+and a migration strategy for integrating ChebyHolo into existing hybrid
+SSM-attention architectures (Chimera). When validated, ChebyHolo is expected
+to outperform current architectures on long-context benchmarks (RULER, PG-19,
+BABILong) by eliminating garbage collection discontinuities and providing
+mathematically grounded, minimax-optimal context representation.
+
+--------------------------------------------------------------------------------
+1. INTRODUCTION
+--------------------------------------------------------------------------------
+
+The fundamental challenge of long-sequence language modeling is not
+computational — modern hardware has sufficient memory — but representational:
+how do we compress an arbitrarily long context history into a fixed-budget
+memory structure that preserves the information needed for the next token
+prediction, in a way that is both computationally efficient and recoverable?
+
+Current approaches trade off along three axes: memory budget, update cost,
+and information preservation quality. State Space Models (Mamba, Mamba2,
+RWKV, GLA) use fixed-size recurrent states that compress context via
+learned exponential decay [Gu et al., 2021; Dao & Gu, 2024]. While efficient
+(O(1) memory, O(T) compute), they suffer from what we call the
+"exponential forgetting floor": any information not selected by the gating
+mechanism decays irrecoverably at rate α^k, regardless of its semantic
+importance. This is strictly suboptimal for tasks requiring retrieval of
+information from 8,000 tokens ago with the same fidelity as 3 tokens ago.
+
+Landmark-based systems (Compressive Transformer [Rae et al., 2020], Chimera
+[OrthoSSM, 2025]) address this by explicitly storing K "important" tokens as
+landmark embeddings with a separate retrieval mechanism. This is better, but
+introduces two new problems: (a) landmarks are discrete snapshots — the
+continuous trajectory between landmarks is never represented; (b) when the
+landmark buffer fills, garbage collection (GC) evicts old landmarks,
+introducing irreversible information loss at unpredictable positions in the
+residual stream.
+
+We propose a third path: represent the context not as K discrete snapshots
+but as the spectral decomposition of the continuous hidden-state trajectory.
+Specifically, we project the temporal trajectory h_1,...,h_T ∈ R^D onto the
+Chebyshev polynomial basis, obtaining K spectral coefficients c_0,...,c_{K-1}
+∈ R^D that capture the "semantic frequency fingerprint" of the context window.
+These K vectors are then bound into a single memory vector V_mem ∈ R^D using
+Holographic Reduced Representations (HRR) [Plate, 1995], a Vector Symbolic
+Architecture (VSA) technique that superposes K key-value pairs via element-wise
+multiplication with pseudo-orthogonal role vectors.
+
+The result is a compression system with:
+  — O(1) memory per layer, regardless of context length
+  — Minimax-optimal approximation error (Chebyshev property)
+  — No garbage collection — the memory is continuously updated, never evicted
+  — Selective retrieval by spectral frequency band
+  — A native spectral importance signal (Δ_k) for complexity-aware routing
+
+We call this framework ChebyHolo (Chebyshev + Holographic).
+
+The rest of the paper is organized as follows. §2 reviews related work.
+§3 introduces the theoretical framework. §4 describes the ChebyHolo
+architecture. §5 presents integration with Chimera. §6 gives theoretical
+guarantees. §7 describes the experimental setup. §8 discusses expected
+results and implications.
+
+--------------------------------------------------------------------------------
+2. RELATED WORK
+--------------------------------------------------------------------------------
+
+2.1 State Space Models and Context Compression
+
+Structured Selective State Spaces (S4, Mamba, Mamba2) [Gu et al., 2021, 2023;
+Dao & Gu, 2024] achieve O(T) sequence processing by maintaining a fixed-size
+recurrent state compressed via selective gating. HiPPO [Gu et al., 2020]
+provides the theoretical foundation by showing that projecting input history
+onto orthogonal polynomial bases (Legendre, Chebyshev) minimizes online
+approximation error. ChebyHolo extends this insight: while HiPPO uses
+orthogonal polynomials *inside* the SSM recurrence, we use them *externally*
+as a compression layer on top of the SSM scan output. These approaches are
+complementary — ChebyHolo can sit above Mamba2 and compress its scan output
+into a richer memory structure than the SSM state alone can provide.
+
+2.2 Landmark and Compressive Memory Systems
+
+The Compressive Transformer [Rae et al., 2020] compresses old activations
+using a learned network. Memorizing Transformers [Khandelwal et al., 2019]
+use external k-NN memory. Recurrent Memory Transformer (RMT) [Bulatov et al.,
+2022] uses special [MEM] tokens. AutoCompressor [Chevalier et al., 2023]
+compresses text into summary vectors. All of these maintain discretized memory
+structures and require explicit eviction/compression decisions. Chimera
+[OrthoSSM, 2025] combines Mamba2 with landmark tokens and TTT-based adaptive
+routing but retains GC-based eviction. ChebyHolo eliminates GC entirely.
+
+2.3 Vector Symbolic Architectures
+
+Holographic Reduced Representations [Plate, 1995] bind structured information
+in fixed-size vectors via circular convolution. Hyperdimensional Computing
+[Kanerva, 2009] uses high-dimensional bipolar vectors with similar properties.
+Recent work has applied VSA to neural network representations [Frady et al.,
+2021; Schlegel et al., 2022] and probing LLM activations [Quirke et al., 2023].
+We are, to our knowledge, the first to apply VSA binding to *spectral
+coefficients of hidden-state trajectories* for context compression in LLMs.
+
+2.4 Spectral Methods in Sequence Modeling
+
+Fourier-based positional embeddings [Su et al., 2021 — RoPE] and spectral
+mixing [Guibas et al., 2021 — FNet] use frequency decomposition for position
+or token mixing. FLASH [Hua et al., 2022] and other linear attention variants
+use spectral structure for efficiency. None of these use spectral decomposition
+of the *temporal trajectory of hidden states* as a context memory mechanism.
+
+2.5 Test-Time Training and Adaptive Compression
+
+TTT [Sun et al., 2024] updates model parameters at inference time based on
+prediction error. ChebyHolo's Δ_k signal is conceptually related but operates
+in the spectral domain of context trajectories rather than in weight space,
+and is inherently interpretable (per-frequency-band semantic change).
+
+--------------------------------------------------------------------------------
+3. THEORETICAL FRAMEWORK
+--------------------------------------------------------------------------------
+
+3.1 Problem Formulation
+
+Let a language model with d_model = D process a token sequence x_1,...,x_T
+producing hidden states h_1,...,h_T ∈ R^D after a given layer. We seek a
+compression function Φ : (h_1,...,h_T) → M, where M is a fixed-size memory
+structure independent of T, such that relevant information can be retrieved
+from M to improve prediction at time t > T.
+
+We characterize "relevant information" as information that reduces perplexity
+on future tokens, as measured empirically on held-out long-context benchmarks.
+
+3.2 The Spectral Smoothness of Semantic Trajectories Hypothesis
+
+HYPOTHESIS (SSST): The hidden-state trajectory h : {1,...,T} → R^D of a
+language model processing natural text satisfies:
+
+  ||c_k||_2  ~  k^{-β},   β ∈ [1.5, 2.5]   for k >> 0
+
+where c_k are the Chebyshev polynomial coefficients of the trajectory (defined
+in §3.3), and the relation holds dimension-wise in expectation over documents.
+
+MOTIVATION: Three independent lines of indirect evidence support SSST:
+
+  (i) The singular value spectrum of the hidden-state covariance matrix in
+  trained LLMs exhibits a clear power-law [Henighan et al., 2020]. Since the
+  Chebyshev coefficients are inner products of the trajectory with orthogonal
+  basis functions, and the basis functions are bounded and smooth, the
+  coefficient norms inherit the power-law structure of the covariance spectrum
+  under mild conditions.
+
+  (ii) Natural language has long-range statistical dependencies following
+  Zipf's law and its generalizations. Texts on consistent topics produce
+  hidden-state trajectories that change gradually, i.e., are spectrally smooth.
+  Abrupt topic changes (a known edge case) violate smoothness but are locally
+  detectable via our Δ_k signal (§3.6).
+
+  (iii) HiPPO [Gu et al., 2020] proves that Chebyshev and Legendre polynomials
+  provably minimize online approximation error for smooth input functions.
+  This is mathematically equivalent to saying that smooth inputs have
+  rapidly decaying Chebyshev coefficients — the exact content of SSST.
+
+PREDICTION: If SSST holds with β ≥ 1.5, the fraction of trajectory energy
+captured by the first K coefficients satisfies:
+
+  E(K) / E(∞)  ≥  1 - C · K^{1-β}  ≥  1 - C · K^{-0.5}
+
+For K=32 (C≈0.5): capture ≥ 91%. For K=64: capture ≥ 94%.
+This must be validated empirically as Experiment 0 (§7.1).
+
+3.3 Chebyshev Spectral Encoding
+
+Given a context window of T tokens with hidden states h_n ∈ R^D, n=1,...,T,
+we define the Chebyshev encoding as follows.
+
+NORMALIZED TIME GRID: Map token indices to Chebyshev nodes of the first kind:
+
+  t_n  =  cos( π(2n-1) / (2T) ),   n = 1, ..., T
+
+These are the optimal interpolation nodes that minimize the maximum
+interpolation error (Chebyshev equioscillation theorem).
+
+COEFFICIENT COMPUTATION:
+
+  c_k  =  (2/T) · Σ_{n=1}^{T}  h_n · T_k(t_n),   k = 0, 1, ..., K-1
+
+where T_k(x) = cos(k · arccos(x)) is the degree-k Chebyshev polynomial
+of the first kind. Each c_k ∈ R^D is a D-dimensional vector.
+
+SEMANTIC INTERPRETATION:
+  c_0  = (2/T) · Σ_n h_n / 2  ≈  mean(h_n)    (semantic centroid)
+  c_1  ∝  Σ_n h_n · t_n       ≈  linear trend   (semantic drift)
+  c_k  (k ≥ 2)                                   (k-th order oscillations)
+
+RECONSTRUCTION: Given K coefficients, the trajectory can be reconstructed as:
+
+  ĥ(t) = (c_0/2)  +  Σ_{k=1}^{K-1} c_k · T_k(t)
+
+MINIMAX OPTIMALITY: Among all polynomials of degree K-1 approximating h(·),
+the Chebyshev truncation minimizes the worst-case (L∞) error. This is
+strictly superior to exponential decay, which is optimal only for L2 error
+over uniformly sampled signals and provides no worst-case guarantees.
+
+3.4 VSA Holographic Binding
+
+The K coefficient vectors c_0,...,c_{K-1} ∈ R^D are bound into a single
+holographic memory vector using Vector Symbolic Architecture.
+
+ROLE VECTORS: Sample K bipolar role vectors once (fixed throughout training):
+
+  r_k  ∈ {+1, -1}^D,   k = 0, ..., K-1,   i.i.d. uniform
+
+These roles are not parameters — they are fixed random vectors analogous
+to positional embeddings.
+
+BINDING (ENCODING):
+
+  V_mem  =  Σ_{k=0}^{K-1}  c_k ⊙ r_k    ∈ R^D
+
+where ⊙ denotes element-wise (Hadamard) multiplication.
+
+UNBINDING (RETRIEVAL): To recover the approximation of coefficient c_k:
+
+  ĉ_k  =  V_mem ⊙ r_k
+
+CORRECTNESS: Since r_k ⊙ r_k = 1 (element-wise) and E[r_k ⊙ r_j] = 0 for
+k ≠ j (pseudo-orthogonality), we have:
+
+  ĉ_k = c_k  +  Σ_{j≠k} c_j ⊙ (r_j ⊙ r_k)  =  c_k + η_k
+
+where η_k is the interference noise term (analyzed in §6.1).
+
+HOLOGRAPHIC PROPERTY: Every dimension of V_mem encodes a superposition of
+all K coefficients. Removing any subset of dimensions degrades all
+coefficients equally (graceful degradation), rather than catastrophically
+destroying specific stored values. This is why we call it "holographic."
+
+EMA UPDATE: The memory is updated with exponential moving average rather than
+discrete replacement:
+
+  V_mem  ←  α · V_mem  +  (1-α) · Σ_k c_k^{new} ⊙ r_k
+
+This ensures no information is ever completely discarded — unlike GC-based
+systems where eviction is irreversible.
+
+3.5 Complex DFT Roles for Phase-Aware Binding
+
+Beyond bipolar real roles, we propose complex DFT roles:
+
+  r_k[d]  =  e^{i · 2π · k · d / D},   k=0,...,K-1,   d=0,...,D-1
+
+BINDING (complex):
+
+  V_c  =  Σ_k  (c_k + 0·i) ⊙ r_k    ∈ C^D
+
+UNBINDING (complex) — IMPORTANT CORRECTION:
+
+  ĉ_k  =  Re( V_c  ⊙  conj(r_k) )    ← element-wise, NOT a DFT sum
+
+The unbinding is always element-wise multiplication by the conjugate role.
+The roles have DFT structure, but the retrieval operation is VSA unbinding —
+it does NOT collapse the vector to a scalar via a DFT sum over d.
+
+ADVANTAGES OF COMPLEX ROLES:
+  (i)  Phase as temporal index: two windows of the same topic at different
+       positions t_1 ≠ t_2 produce similar coefficient magnitudes but
+       different phases in V_c, enabling temporal disambiguation.
+  (ii) Algebraic structure: roles form the group U(1)^D (D-torus), enabling
+       temporal shifting via V_c · e^{iθ} and principled interpolation
+       between memories as geodesics on the torus manifold.
+  (iii) Spectral similarity: <V_c^{(1)}, V_c^{(2)}>_C ≈ Σ_k ||c_k^{(1)}||
+       · ||c_k^{(2)}|| · cos(φ_k^{(12)}) naturally factors into magnitude
+       and phase components, enabling frequency-band-selective similarity.
+
+NOTE ON QUATERNIONS: Quaternions do not form a field (non-commutative
+multiplication), breaking the algebraic requirements of VSA binding/unbinding.
+Complex numbers are the correct algebraic structure for phase-aware VSA.
+
+3.6 Spectral Importance Signal (Δ_k)
+
+We maintain two windows: a past window W_past = [t-2W, t-W] and a present
+window W_now = [t-W, t], computing Chebyshev coefficients C^past and C^now.
+
+PER-FREQUENCY IMPORTANCE:
+
+  Δ_k  =  || c_k^{now} - c_k^{past} ||_2,   k = 0, ..., K-1
+
+AGGREGATE IMPORTANCE:
+
+  I_total  =  Σ_{k=0}^{K-1}  w_k · Δ_k
+
+where w_k are learnable scalar weights (K additional parameters per layer).
+
+SEMANTIC INTERPRETATION:
+  Δ_0 large → global semantic shift (topic change)
+  Δ_1 large → linear drift (narrative development)
+  Δ_k (k < K/4) large → low-frequency semantic restructuring
+  Δ_k (k > 3K/4) large → high-frequency local complexity (code, tables)
+
+PROPERTIES:
+  (i)  Purely spectral: does not require model predictions
+  (ii) Per-band decomposition: enables band-selective memory updates
+  (iii) Differentiable: w_k are learnable via backprop through ||·||_2
+  (iv) Complementary to TTT error: TTT measures prediction complexity;
+       Δ_k measures context trajectory complexity — orthogonal signals
+
+To our knowledge, no prior work uses per-band spectral difference of hidden-
+state trajectory coefficients as an importance/complexity signal for memory
+management. This is a novel contribution regardless of the broader ChebyHolo
+framework.
+
+--------------------------------------------------------------------------------
+4. CHEBYHOLO ARCHITECTURE
+--------------------------------------------------------------------------------
+
+4.1 Module Structure
+
+ChebyHoloMemory consists of four submodules:
+
+  (1) ChebyWindowEncoder: maintains sliding buffer, computes c_k
+  (2) SpectralImportanceSignal: computes Δ_k from two windows
+  (3) VSAMemory: maintains V_mem, handles binding/unbinding
+  (4) SpectralRetriever: selects relevant bands, applies diff_attn
+
+4.2 ChebyWindowEncoder
+
+STATE:  circular buffer buf ∈ R^{W×D}, pointer pos ∈ Z
+INPUT:  h_t ∈ R^D (hidden state of current token)
+OUTPUT: c_now ∈ R^{K×D} (recomputed every stride = W/2 tokens)
+
+ALGORITHM:
+  1. buf[pos % W] ← h_t; pos ← pos + 1
+  2. If pos % stride == 0:
+       a. Compute Chebyshev nodes t_n = cos(π(2n-1)/(2W)), n=1,...,W
+          (precomputed, shape W, stored as buffer)
+       b. Compute T_k(t_n) for k=0,...,K-1
+          (precomputed matrix Cheb ∈ R^{K×W}, stored as buffer — no GPU compute)
+       c. c_new[k] = (2/W) · Cheb[k,:] @ buf   ← O(K·W·D) matmul
+          (single batched matmul: shape [K,W] @ [W,D] → [K,D])
+       d. c_past ← c_now; c_now ← c_new
+  3. Return c_now
+
+AMORTIZED COST: O(K·W·D / stride) = O(2K·D) per token.
+For K=32, D=1024: 65,536 FLOPs/token per layer. At d_model=1024, the Mamba2
+SSD scan costs O(T·D·d_state) ≈ 67M FLOPs for the full layer — the encoder
+adds <0.1% overhead.
+
+4.3 VSAMemory
+
+STATE:  V_mem ∈ C^D (complex if using DFT roles, R^D if real roles)
+        r_roles ∈ {±1}^{K×D} or C^{K×D} (fixed, not parameters)
+
+UPDATE (triggered when I_total > threshold_adapt):
+
+  V_mem  ←  α · V_mem  +  (1-α) · Σ_{k=0}^{K-1}  c_now[k] · r_k
+
+  where α ∈ [0.85, 0.98] is a fixed or learned EMA factor,
+  and the update can be band-selective:
+  
+  V_mem  ←  V_mem  +  (1-α) · Σ_{k : Δ_k > τ_k}  (c_now[k] - ĉ_k) · r_k
+
+  The band-selective update only modifies slots k where the coefficient
+  has changed significantly, preserving slots where the context is stable.
+
+MEMORY COST:
+  Real roles: D floats = 1024 × 4 bytes = 4 KB per layer
+  Complex roles: 2D floats = 8 KB per layer
+  Compare to NativeLandmarkArchive: 64 × 128 × 4 = 32 KB per layer
+  Reduction: 4-8× less memory per layer; DOES NOT GROW with context length
+
+4.4 SpectralRetriever
+
+INPUT:   query q ∈ R^D, memory V_mem ∈ C^D, c_now ∈ R^{K×D}
+OUTPUT:  enriched query output h_out ∈ R^D
+
+ALGORITHM:
+  1. Compute relevance scores per band:
+       score_k = <q, c_now[k]> / sqrt(D),   k=0,...,K-1
+
+  2. Select top-J relevant bands (J ≤ K, default J=8):
+       top_bands = argsort(score_k, descending=True)[:J]
+
+  3. Unbind selected coefficients:
+       ĉ_k = Re(V_mem ⊙ conj(r_k))   for k in top_bands
+
+  4. Reconstruct historical contribution at current time t:
+       h_hist = Σ_{k in top_bands}  score_k · ĉ_k
+
+  5. Apply differential attention (denoising step — removes VSA interference):
+       h_denoised = diff_attn_v2([q], [h_hist])   ← reuses existing kernel
+
+  6. Gated injection (same mechanism as current Chimera):
+       h_out = h_scan + sigmoid(inject_gate) · h_denoised
+
+SELECTIVITY: The top-J selection means the model queries only the relevant
+spectral bands. A narrative summary task queries low frequencies (c_0, c_1);
+a code completion task queries high frequencies for recent detail. This
+selectivity is learned implicitly through the inject_gate gradient.
+
+--------------------------------------------------------------------------------
+5. INTEGRATION WITH CHIMERA
+--------------------------------------------------------------------------------
+
+5.1 Current Chimera Context Compression Stack
+
+The Chimera stack (chimera_h200/advanced_chimera.py) processes context as:
+
+  Mamba2 SSD scan
+    → per_token_err (compute_token_errors_triton)
+    → GatedComplexityPredictor (router: FAST / HYBRID / FULL tiers)
+    → NativeLandmarkArchive (64 landmarks × 128 dims, diff_attn retrieval)
+    → AsyncLightBus (cross-layer communication)
+
+Known design bottlenecks:
+  - NativeLandmarkArchive.maybe_archive: O(K_top · D) + eviction logic
+  - GC when n_archived == max_landmarks: discrete information loss
+  - Self-attention among landmarks: O(lm²) for lm = 64
+
+5.2 ChebyHolo Migration Plan
+
+PHASE 1 (Validation, no model changes):
+  Add ChebyWindowEncoder as a monitoring module PARALLEL to existing archive.
+  Measure ||c_k||_2 vs k on Chimera processing PG-19/Wikitext-103.
+  Validate SSST hypothesis. Measure β.
+  Cost: read-only instrumentation, zero model modification.
+
+PHASE 2 (Signal enrichment):
+  Feed Δ_0,...,Δ_{K-1} as additional features to GatedComplexityPredictor.
+  A/B test routing quality: does Δ-augmented routing beat TTT-only routing?
+  This is a pure addition — the existing archive is unchanged.
+
+PHASE 3 (Archive replacement):
+  Replace NativeLandmarkArchive with ChebyHoloMemory (real roles, K=32).
+  Ablation study: GC-disabled (baseline) vs ChebyHolo.
+  Evaluate on RULER, PG-19, BABILong.
+
+PHASE 4 (Complex roles):
+  Upgrade to complex DFT roles. Evaluate phase-sensitivity benefit.
+  Expected to help most on tasks with multiple co-referent entities
+  (book QA, multi-turn dialogue).
+
+PHASE 5 (End-to-end training):
+  Fine-tune the full Chimera stack on long-context corpus with ChebyHolo.
+  Expected to require 10-20B tokens for the model to learn Δ_k routing.
+
+5.3 Backward Compatibility
+
+Existing Chimera components preserved without modification:
+  - ttt_kernel.py (lion_constrained_update_inplace): TTT adapts dt_bias
+    of Mamba2 — orthogonal to context compression. No changes.
+  - sgr_slr.py (diff_attn_v2_triton): Reused directly in SpectralRetriever
+    for VSA interference denoising. No changes.
+  - AsyncLightBus: Cross-layer communication is independent of how context
+    is stored per-layer. No changes.
+  - GatedComplexityPredictor: Augmented with Δ features but core logic
+    (softmax routing, anti-collapse floor) unchanged.
+
+--------------------------------------------------------------------------------
+6. THEORETICAL ANALYSIS
+--------------------------------------------------------------------------------
+
+6.1 Interference Bound
+
+THEOREM 1 (VSA Interference): Let r_k ∈ {±1}^D be i.i.d. uniform bipolar
+role vectors. The retrieved coefficient satisfies:
+
+  ĉ_k  =  c_k  +  η_k
+
+where η_k is the interference noise term with:
+
+  E[η_k[d]]     =  0                for all d
+  Var[η_k[d]]   =  (K-1) · E[||c_j||_2² / D]    (averaged over j≠k)
+  StdDev[η_k[d]]  ≈  ||c_j||_avg · sqrt((K-1)/D)
+
+COROLLARY: For K=32 and D=1024:
+  StdDev  ≈  ||c||_avg · sqrt(31/1024)  ≈  0.174 · ||c||_avg
+
+For ||c||avg ≈ 1 (unit-normalized hidden states), the interference is ~17%
+of the signal magnitude. After differential attention denoising, this is
+expected to reduce to <5% (empirically observed in VSA literature for similar
+SNR regimes and 2 denoising rounds [Frady et al., 2021]).
+
+IMPLICATION FOR DESIGN: ChebyHolo requires D ≥ 512 for reliable retrieval
+with K=32. For models with D=256 (small ablation models), reduce to K=16.
+
+6.2 Reconstruction Error
+
+THEOREM 2 (Chebyshev Approximation Error): Let h : [-1,1] → R^D be analytic
+with known analytic continuation to the Bernstein ellipse S_ρ (ρ > 1).
+The K-coefficient Chebyshev truncation satisfies:
+
+  max_{t ∈ [-1,1]}  ||h(t) - ĥ_K(t)||_2  ≤  C_ρ · ρ^{-K}
+
+where C_ρ depends only on the ellipse parameter ρ.
+
+If instead h satisfies the power-law condition ||c_k|| ≤ C · k^{-β}, then:
+
+  max_{t ∈ [-1,1]}  ||h(t) - ĥ_K(t)||_2  ≤  C' · K^{1-β}
+
+For β=2 (SSST mid-range): error ≤ C' · K^{-1}.
+For K=32: error ≤ C'/32 — quadratically faster convergence than
+exponential SSM decay for functions NOT selected by the gate.
+
+COMPARISON WITH MAMBA2: For a token at position t-k in the context, Mamba2's
+contribution to the state decays as α^k. By contrast, ChebyHolo's reconstruction
+error for that token is bounded by C' · K^{1-β} regardless of its temporal
+position. For long-range relevant information (k > 1/log(1/α)), Chebyshev
+reconstruction is strictly superior. For very recent information (k < 1/log(1/α),
+typically k < 50-100), Mamba2's exact state is superior — this is why the full
+hybrid architecture (ChebyHolo ON TOP OF Mamba2) is optimal.
+
+6.3 Computational Complexity
+
+Let T = total context length, K = number of Chebyshev coefficients,
+W = window size, D = d_model, L = number of model layers.
+
+┌──────────────────┬──────────────────┬─────────────────────────────────────┐
+│ Component        │ Per-token cost   │ Notes                               │
+├──────────────────┼──────────────────┼─────────────────────────────────────┤
+│ Mamba2 SSD scan  │ O(D²·d_state/T)  │ amortized per token                 │
+│ Cheby encoder    │ O(2K·D)          │ amortized (recompute every stride)  │
+│ Δ_k signal       │ O(K·D)           │ per-freq L2 norm                    │
+│ VSA binding      │ O(K·D) when upd. │ triggered by threshold              │
+│ SpectralRetrieval│ O(J·D + D·d_h)   │ J<<K bands + diff_attn              │
+│ Total overhead   │ O(K·D)           │ K=32 << d_state typically           │
+└──────────────────┴──────────────────┴─────────────────────────────────────┘
+
+TOTAL OVERHEAD vs. MAMBA2 ALONE: At K=32, D=1024, the ChebyHolo overhead is
+~65K FLOPs/token/layer. Mamba2 at D=1024, d_state=16 costs ~33M FLOPs/token/
+layer. Overhead: ~0.2%. Memory: +8 KB per layer (complex roles V_mem).
+
+TOTAL OVERHEAD vs. CHIMERA (NativeLandmarkArchive): The existing archive costs
+O(K_top²·D) for self-attention among landmarks + O(T_archive · D) for
+retrieval. For K_top=64, D=1024: ~4M FLOPs. ChebyHolo costs ~65K FLOPs.
+ChebyHolo is 60× cheaper in the retrieval/management path.
+
+6.4 Information Capacity
+
+A single VSA vector V_mem ∈ R^D can store up to O(D) items before
+interference degrades retrieval quality below a chosen SNR threshold.
+For D=1024 and noise floor σ²=0.01: capacity ≈ D/(3σ²) ≈ 34,000 items.
+For K=32 Chebyshev coefficients: we use only ~0.1% of theoretical capacity.
+This means V_mem can in principle store histories from multiple windows
+simultaneously — the multi-scale extension (§E1) is capacity-bounded only
+at D/(3σ²) ≈ 34K for D=1024, far more than any practical context length.
+
+--------------------------------------------------------------------------------
+7. EXPERIMENTAL SETUP
+--------------------------------------------------------------------------------
+
+7.1 Experiment 0: Validating SSST (Pre-condition)
+
+DATASET: PG-19 [Rae et al., 2020] (long books), BookCorpus, The Pile.
+MODEL: Existing Chimera checkpoint (or GPT-2-Medium as baseline).
+PROCEDURE: For each document, extract hidden states h_1,...,h_T at layer L/2.
+  Compute Chebyshev coefficients c_0,...,c_{K-1} for K=64.
+  Measure ||c_k||_2 vs k for k=0,...,63. Fit power-law: log||c_k|| ~ -β·log(k).
+METRICS: β estimate; fraction of energy in top-K coefficients E(K)/E(∞) for
+  K ∈ {8, 16, 32, 64}.
+SUCCESS CRITERION: β ≥ 1.5 and E(32)/E(∞) ≥ 0.90 for at least 80% of
+  documents. If this fails, wavelets are needed (§12 extension).
+
+7.2 Experiment 1: Spectral Importance vs. TTT Error
+
+SETUP: Run Chimera on PG-19 long documents. At each step, compute both
+  (a) TTT per-token error from compute_token_errors_triton
+  (b) Δ_total from ChebyHoloMemory spectral signal
+METRICS: Correlation between Δ_total and TTT error. Correlation between
+  Δ_0 and subsequent topic change (measured by embedding cosine distance over
+  the next 100 tokens). Routing accuracy for FULL/HYBRID/FAST tier.
+HYPOTHESIS: Δ_0 will be a better predictor of topic change than TTT error
+  (TTT error is more sensitive to rare words and syntax, not topic shifts).
+
+7.3 Experiment 2: Memory Quality — Needle in a Haystack
+
+DATASET: NIAH (Needle In A Haystack) at context lengths {4K, 16K, 64K, 128K}.
+BASELINES: Mamba2, Chimera (NativeLandmarkArchive), Compressive Transformer.
+VARIANTS: ChebyHolo-Real, ChebyHolo-Complex (DFT roles).
+METRICS: Retrieval accuracy at various needle depths (proportion of context
+  before the needle). Expected: ChebyHolo-* > NativeLandmarkArchive for
+  needles placed at positions that trigger GC eviction in the baseline.
+
+7.4 Experiment 3: Long-Context Perplexity
+
+DATASET: PG-19 (held-out books), context window 32K-128K tokens.
+METRIC: Perplexity at token positions {1K, 4K, 8K, 16K, 32K, 64K, 128K}.
+EXPECTED RESULT: ChebyHolo perplexity should not degrade as sharply as
+  NativeLandmarkArchive at positions corresponding to GC events (detectable
+  as perplexity spikes in the baseline every ~64K tokens).
+
+7.5 Experiment 4: RULER Benchmark
+
+DATASET: RULER [Hsieh et al., 2024] — comprehensive long-context reasoning.
+SUBTASKS: Multi-hop QA, Common Words Extraction, Variable Tracking, Book QA.
+BASELINES: Mamba2-{790M, 2.8B}, Chimera baseline.
+VARIANTS: Chimera + ChebyHolo (K=32), Chimera + ChebyHolo (K=64, complex).
+EXPECTED IMPROVEMENT: +3-7% on multi-hop QA and Book QA tasks (where
+  global semantic structure is critical and GC is most damaging).
+  Modest improvement on Variable Tracking (requires exact recent memory —
+  Mamba2 SSM state handles this better than any compressor).
+
+7.6 Experiment 5: Ablation Study
+
+  A. K ablation: K ∈ {8, 16, 32, 64} — find the knee in the K vs. quality curve
+  B. Roles: real bipolar vs. complex DFT — measure quality delta and cost
+  C. Window W: W ∈ {256, 512, 1024, 2048} — robustness to window size
+  D. Band selection J: J ∈ {1, 4, 8, 16} — selectivity vs. completeness trade-off
+  E. EMA α: α ∈ {0.85, 0.90, 0.95, 0.99} — recency vs. history weight
+
+--------------------------------------------------------------------------------
+8. EXPECTED RESULTS AND DISCUSSION
+--------------------------------------------------------------------------------
+
+8.1 Expected Performance Profile
+
+Based on the theoretical analysis, we predict the following relative
+performance profile (to be confirmed by experiments):
+
+  TASKS WHERE CHEBYHOLO IS EXPECTED TO WIN:
+    — Long-document QA (book-level context): +5-10% vs. Chimera
+      Reason: GC eviction in Chimera destroys chapter-level context.
+              Chebyshev low-freq coefficients preserve global structure.
+    — Multi-document reasoning: +3-7%
+      Reason: Cross-document semantics are spectrally smooth.
+    — Continuation tasks (e.g., write next chapter): better coherence
+      Reason: c_0, c_1 preserve the global tone/style of the document.
+
+  TASKS WHERE CHEBYHOLO IS NEUTRAL OR SLIGHTLY BEHIND:
+    — Short-context tasks (< 4K tokens): neutral
+      Reason: At short context, the landmark buffer is not full — no GC.
+    — Code completion with exact variable tracking: neutral to -1-2%
+      Reason: Exact recent code tokens matter; this is well-handled by
+              Mamba2 SSM state. ChebyHolo adds overhead without benefit here.
+              Fix: low-freq retrieval for code architecture context; keep
+              Mamba2 SSM for exact token-level tracking.
+    — Tables / structured data: potential -1-3%
+      Reason: Abrupt text-to-table transitions trigger Gibbs phenomenon.
+              Fix: wavelet extension (§12).
+
+8.2 Failure Modes and Mitigations
+
+FM1 — SSST FAILS (β < 1.0):
+  If hidden-state trajectories are NOT spectrally smooth (e.g., for highly
+  technical mixed-modality inputs), Chebyshev compression is inefficient.
+  MITIGATION: Switch to Daubechies-4 wavelets, which handle both smooth
+  regions and discontinuities via the multi-resolution ladder. SSST validation
+  (Exp. 0) gates this decision.
+
+FM2 — INTERFERENCE IN SMALL MODELS (D < 512):
+  For D=256, K=32: StdDev_interference ≈ 0.35 — too high for reliable retrieval.
+  MITIGATION: Reduce K to 16 for small models. Use iterative denoising
+  (Correct-and-Clean VSA [Frady et al., 2021]) to reduce noise 2× in 2 rounds.
+
+FM3 — GRADIENT FLOW TO ENCODER:
+  The VSA binding operation (Σ c_k ⊙ r_k) is differentiable w.r.t. c_k.
+  The Chebyshev encoding (c_k = (2/W) · Cheb @ buf) is differentiable w.r.t.
+  buf. The gradient therefore flows: loss → inject_gate → h_denoised →
+  ĉ_k → V_mem (through EMA α) → c_k → buf → h_scan. This path must be
+  verified to be non-vanishing in the first 1B tokens of training.
+  MITIGATION: Initialize inject_gate=0 (same as current Chimera); ensure
+  compress_query_gate equivalent provides warm-up gradient.
+
+FM4 — PERIODIC RECOMPUTE LATENCY SPIKES:
+  Every stride tokens, a K×W matmul is launched. For W=2048, K=32, D=1024
+  this is a [32,2048]@[2048,1024] = 67M FLOPs matmul — approximately
+  one Mamba2 recurrence step. This introduces a periodic latency spike of
+  ~0.1ms on H200. MITIGATION: Asynchronous recompute in a CUDA stream
+  separate from the main forward pass; overlap with KV-cache operations.
+
+8.3 Comparison with Competing Novel Approaches
+
+  vs. HiPPO-based SSMs: HiPPO uses orthogonal polynomials INSIDE the
+  recurrence; ChebyHolo uses them OUTSIDE as compression. Complementary, not
+  competing. Combining Mamba2 (HiPPO internal) + ChebyHolo (external) gives
+  two levels of spectral compression — dual-scale memory.
+
+  vs. TTT (Sun et al., 2024): TTT updates model weights at test time; ChebyHolo
+  updates a fixed-size memory vector. TTT is deeper (changes how the model
+  processes future tokens); ChebyHolo is shallower (provides richer context
+  for the existing processing). They are again complementary — and Chimera
+  already uses TTT, making ChebyHolo + TTT + Mamba2 a three-level adaptive
+  system.
+
+  vs. RetNet (Sun et al., 2023): RetNet uses recurrent retention with
+  exponential decay. Like Mamba2, it suffers from the exponential forgetting
+  floor. ChebyHolo's minimax-optimal preservation is strictly superior for
+  long-range semantic structure.
+
+  vs. Infini-Attention (Munkhdalai et al., 2024): Infini-Attention compresses
+  context into a compressive associative memory (linear attention as KV-store).
+  ChebyHolo compresses into spectral coefficients via VSA. Both avoid GC;
+  ChebyHolo provides stronger theoretical guarantees (minimax vs. linear
+  attention approximation error), but Infini-Attention may be easier to
+  implement and integrate with existing transformer architectures.
+
+8.4 Toward a Grand Unified Memory for Language Models
+
+The theoretical framework presented here points toward a broader research
+direction: what is the information-theoretically optimal memory structure for
+a language model with bounded memory budget B (in bits)?
+
+For smooth semantic trajectories, we conjecture that the Chebyshev-VSA
+representation is near-optimal: it requires O(K log D) bits to store
+(K coefficient vectors, each approximately rankable in D dimensions), and
+achieves approximation error O(K^{1-β}) — the best possible for polynomial
+approximation of smooth functions (Chebyshev equioscillation theorem).
+
+For the full diversity of language inputs (smooth text, abrupt transitions,
+code, structured data), a multi-basis system (Chebyshev for smooth regions,
+wavelets for transients, exact SSM state for the most recent W tokens) is
+likely the optimal decomposition. This is the ChebyHolo-v2 research direction.
+
+--------------------------------------------------------------------------------
+9. NOVELTY STATEMENT
+--------------------------------------------------------------------------------
+
+To our knowledge, no prior work combines:
+
+  (1) Chebyshev polynomial coefficients of the hidden-state temporal trajectory
+      as the encoding basis (distinct from HiPPO, which uses polynomials inside
+      the recurrence, not outside as memory compression)
+
+  (2) VSA/HRR binding of spectral coefficients into a single D-dimensional
+      holographic memory vector (no prior work uses spectral coefficients as
+      VSA "values")
+
+  (3) Complex DFT role vectors enabling phase-aware temporal disambiguation
+      (closest work: Plate's complex HRR, but not applied to LLM context)
+
+  (4) Per-frequency-band spectral importance signal Δ_k measuring past-present
+      coefficient divergence (completely novel to our knowledge)
+
+  (5) Integration with a hybrid SSM-attention architecture and demonstration
+      that GC-free O(1) memory can replace discrete landmarks
+
+Papers (1)+(4) are sufficient for a strong NeurIPS 2026 submission.
+Papers (1)+(2)+(3)+(5) constitute the ICLR 2027 full paper.
+
+--------------------------------------------------------------------------------
+10. CONCLUSION
+--------------------------------------------------------------------------------
+
+We have proposed ChebyHolo, a spectral holographic context compression
+framework that treats hidden-state trajectories as continuous functions,
+represents them via Chebyshev polynomial coefficients, and binds those
+coefficients into a fixed-size holographic memory using Vector Symbolic
+Architecture. The key theoretical contributions are:
+
+  — The SSST hypothesis: semantic trajectories are spectrally smooth
+  — Minimax-optimality of Chebyshev compression for smooth trajectories
+  — VSA holographic binding with O(1) memory and O(K·D) update cost
+  — Complex DFT roles for phase-aware temporal geometry
+  — The Δ_k spectral importance signal as a novel complexity proxy
+
+ChebyHolo is designed to replace the NativeLandmarkArchive in Chimera,
+eliminating garbage collection, reducing memory cost per layer by 4×,
+and providing richer long-range context preservation. Theoretical analysis
+predicts +3-10% improvement on long-context reasoning tasks with <0.3%
+computational overhead relative to the full model.
+
+The broader implication is that spectral methods — historically dominant in
+signal processing and numerical analysis — are largely unexplored for language
+model context memory. ChebyHolo opens this direction, and the natural
+extensions (multi-scale wavelets, nested VSA for multi-document memory,
+online EW-Chebyshev updates) constitute a multi-year research program at the
+frontier of efficient long-sequence modeling.
+
+The best compressor is not the one that selects the most important moments —
+it is the one that represents the continuous function most faithfully with
+the fewest parameters. Chebyshev polynomials have been the gold standard for
+such representation since the 19th century. It is time they worked inside
+our language models.
+
+--------------------------------------------------------------------------------
+APPENDIX A: CHEBYSHEV POLYNOMIAL PROPERTIES USED IN THIS PAPER
+--------------------------------------------------------------------------------
+
+T_k(cos θ) = cos(kθ)                             [trigonometric identity]
+
+||T_k||_{L²[-1,1], weighted} = π/2  (k≥1), π (k=0)  [orthogonality]
+
+|T_k(x)| ≤ 1 for x ∈ [-1,1]                     [boundedness]
+
+Interpolation via Clenshaw-Curtis at Chebyshev nodes achieves near-minimax
+approximation: the error is within a factor O(log K) of the best K-term
+polynomial approximation (Chebyshev equioscillation theorem).
+
+For analytic f (with analytic continuation to Bernstein ellipse S_ρ):
+  |c_k|  ≤  C · ρ^{-k}   (exponential decay of coefficients)
+
+For f with bounded r-th derivative:
+  |c_k|  ≤  C_r · k^{-r}  (power-law decay of coefficients)
+  → This is the basis of the SSST hypothesis: if h is r-times differentiable
+    in the temporal domain (which smooth semantic trajectories are), its
+    Chebyshev coefficients decay as a power law with exponent r.
+
+--------------------------------------------------------------------------------
+APPENDIX B: VSA INTERFERENCE COMPUTATION
+--------------------------------------------------------------------------------
+
+Let r_k ∈ {±1}^D, i.i.d. uniform. Then:
+
+  E[r_k[d] · r_j[d]] = 0,   j≠k       (zero-mean cross-product)
+  E[(r_k[d] · r_j[d])²] = 1            (unit variance of cross-product)
+
+Let V_mem = Σ_j c_j ⊙ r_j. Then:
+
+  ĉ_k[d] = V_mem[d] · r_k[d]
+          = c_k[d] · (r_k[d])² + Σ_{j≠k} c_j[d] · r_j[d] · r_k[d]
+          = c_k[d] + Σ_{j≠k} c_j[d] · ξ_j(d)
+
+where ξ_j(d) = r_j[d] · r_k[d] ∈ {±1} are i.i.d. ±1 with E[ξ]=0, Var[ξ]=1.
+
+  E[η_k[d]] = 0
+  Var[η_k[d]] = Σ_{j≠k} (c_j[d])² = ||c_j||_d²·(K-1) where ||·||_d is per-dim
+
+By central limit theorem (large K), η_k[d] ~ N(0, ||c||_avg² · (K-1)/D)
+where ||c||_avg is the average coefficient magnitude.
+
+For unit-normalized coefficients (||c_k||_2 = √D per coefficient):
+  ||c_k||_avg_per_dim ≈ 1
+  StdDev[η_k[d]] = sqrt((K-1)/D)
+
+QED — this is the standard VSA interference result [Plate, 1995].
+
+--------------------------------------------------------------------------------
+APPENDIX C: RELATIONSHIP TO HiPPO
+--------------------------------------------------------------------------------
+
+HiPPO [Gu et al., 2020] defines a family of online algorithms for projecting
+a continuous input signal u(t) onto an orthogonal polynomial basis:
+
+  c(t) ∈ R^N   with  d/dt c(t) = A(t)c(t) + B(t)u(t)
+
+The HiPPO-Cheby instance uses Chebyshev polynomials as the basis, achieving
+near-optimal online approximation of u(t). The key insight is that A and B
+can be computed in closed form from the Chebyshev recurrence.
+
+ChebyHolo's encoder is a BATCH (offline) version of HiPPO-Cheby: instead of
+updating c_k online via the recurrence, we recompute c_k periodically from a
+sliding window. This is simpler and more parallelizable (single matmul) but
+requires amortized rather than exact online updates. An online version
+(O(K) exact update per token) can be derived from the HiPPO-Cheby recurrence
+by discretizing the ODE — this is the "E5 — Online Chebyshev" extension
+mentioned in the main document.
+
+The key distinction: HiPPO is an internal component of the SSM (it defines
+A, B matrices for the recurrence). ChebyHolo is an external memory layer
+that sits above the SSM and compresses its output. They are at different
+levels of the architecture and are strictly complementary.
+
+--------------------------------------------------------------------------------
+REFERENCES
+--------------------------------------------------------------------------------
+
+[1] Bulatov, A., Kuratov, Y., & Burtsev, M. (2022). Recurrent memory
+    transformer. NeurIPS 2022.
+
+[2] Chevalier, G., Wettig, T., Ajith, A., Chen, D., & Hashimoto, T. (2023).
+    Adapting language models to compress contexts. EMNLP 2023.
+
+[3] Dao, T., & Gu, A. (2024). Transformers are SSMs: Generalized models and
+    efficient algorithms through structured state space duality. ICML 2024.
+
+[4] Frady, E.P., Kleyko, D., & Sommer, F.T. (2021). Variable binding for
+    sparse distributed representations: Theory and applications.
+    IEEE Trans. Neural Netw. Learn. Syst.
+
+[5] Gu, A., Dao, T., Ermon, S., Rudra, A., & Ré, C. (2020). HiPPO: Recurrent
+    memory with optimal polynomial projections. NeurIPS 2020.
+
+[6] Gu, A., Goel, K., & Ré, C. (2021). Efficiently modeling long sequences
+    with structured state spaces. ICLR 2022.
+
+[7] Gu, A., & Dao, T. (2023). Mamba: Linear-time sequence modeling with
+    selective state spaces. arXiv:2312.00752.
+
+[8] Henighan, T. et al. (2020). Scaling laws for autoregressive generative
+    modeling. arXiv:2010.14701.
+
+[9] Hsieh, C., et al. (2024). RULER: What's the real context window size of
+    your long-context language models? arXiv:2404.06654.
+
+[10] Hua, W., Dai, Z., Liu, H., & Le, Q. (2022). Transformer quality in
+     linear time. ICML 2022.
+
+[11] Kanerva, P. (2009). Hyperdimensional computing: An introduction to
+     computing in distributed representation with high-dimensional random
+     vectors. Cognitive Computation.
+
+[12] Khandelwal, U., He, H., Qi, P., & Jurafsky, D. (2019). Sharp nearby,
+     fuzzy far away: How neural language models use context. ACL 2019.
+
+[13] Munkhdalai, T., Faruqui, M., & Gopal, S. (2024). Leave no context behind:
+     Efficient infinite context transformers with infini-attention.
+     arXiv:2404.07143.
+
+[14] OrthoSSM Research. (2025). Chimera: A hybrid SSM-attention architecture
+     with adaptive routing and landmark-based compression. Internal report.
+
+[15] Plate, T.A. (1995). Holographic reduced representations.
+     IEEE Trans. Neural Networks.
+
+[16] Quirke, P., Lackenby, A., & Minervini, P. (2023). Understanding addition
+     in transformers. ICLR 2024.
+
+[17] Rae, J.W. et al. (2020). Compressive transformers for long-range
+     sequence modelling. ICLR 2020.
+
+[18] Schlegel, K., Neubert, P., & Protzel, P. (2022). A comparison of vector
+     symbolic architectures. Artificial Intelligence Review.
+
+[19] Su, J., Lu, Y., Pan, S., Murtadha, A., Wen, B., & Liu, Y. (2021).
+     RoFormer: Enhanced transformer with rotary position embedding.
+     arXiv:2104.09864.
+
+[20] Sun, Y. et al. (2024). Learning to (learn at test time): RNNs with
+     expressive hidden states. ICML 2024.
+
+[21] Sun, Y. et al. (2023). Retentive network: A successor to transformer for
+     large language models. arXiv:2307.08621.
+
+================================================================================
+END OF PAPER
+================================================================================

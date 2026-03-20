@@ -1,0 +1,79 @@
+╔══════════════════════════════════════════════════════════════════════════╗
+║   OrthoSSM V11 vs Mamba 2 (SSD)  —  Head-to-Head Benchmark            ║
+║   Both: BF16, maximum compute optimization, equal parameter budget     ║
+╚══════════════════════════════════════════════════════════════════════════╝
+  GPU : NVIDIA GeForce RTX 4050 Laptop GPU  (6140 MB)
+  PyTorch: 2.10.0+cu128
+
+  Instantiating models...
+  OrthoSSM V11 :    4,570,780 params (4.57M)
+  Mamba 2 SSD  :    3,710,272 params (3.71M)
+
+==============================================================================
+  BENCHMARK 1 — INFERENCE LATENCY + VRAM SCALING
+==============================================================================
+
+  LATENCY (ms/forward) + VRAM (MB)  —  batch=1, no_grad, BF16
+  Model                 S=  512           S= 1024           S= 2048           S= 4096           S= 8192           S=16384         
+  OrthoSSM_V11             8.2ms/   44MB     11.9ms/   52MB     21.1ms/   69MB     20.5ms/  103MB     44.2ms/  171MB     57.5ms/  308MB 
+  Mamba2_SSD              79.3ms/   62MB    148.6ms/   70MB    286.3ms/   85MB    558.9ms/  134MB   1140.9ms/  232MB   2219.5ms/  428MB /home/OrthoSSM/venv/lib/python3.12/site-packages/torch/nn/functional.py:2954: UserWarning: Mismatch dtype between input and weight: input dtype = c10::BFloat16, weight dtype = float, Cannot dispatch to fused implementation. (Triggered internally at /pytorch/aten/src/ATen/native/layer_norm.cpp:344.)
+  return torch.rms_norm(input, normalized_shape, weight, eps)
+
+
+  THROUGHPUT (K tok/s):
+  Model                      S=512      S=1024      S=2048      S=4096      S=8192     S=16384
+  OrthoSSM_V11               62.8K       86.0K       97.1K      199.9K      185.4K      284.7K
+  Mamba2_SSD                  6.5K        6.9K        7.2K        7.3K        7.2K        7.4K
+
+==============================================================================
+  BENCHMARK 2 — TRAINING CONVERGENCE (200 steps, S=512, B=4)
+==============================================================================
+
+  TRAINING CONVERGENCE — B=4, S=512, 200 steps
+  (Cosine LR 3e-4, BF16 autocast, grad_norm clip 1.0)
+
+  ── OrthoSSM_V11 (4.6M params) ──
+    step   1: loss=8.3362  3481ms/step  0.6K tok/s
+    step  10: loss=8.3339  20ms/step  100.2K tok/s
+    step  25: loss=8.2272  19ms/step  107.9K tok/s
+    step  50: loss=7.7647  19ms/step  108.1K tok/s
+    step 100: loss=6.0859  17ms/step  122.8K tok/s
+    step 150: loss=5.5934  24ms/step  85.9K tok/s
+    step 200: loss=5.5783  17ms/step  123.1K tok/s
+    FINAL: loss=5.5723  PPL=263  38ms/step  53.5K tok/s
+
+  ── Mamba2_SSD (3.7M params) ──
+    step   1: loss=169.6608  739ms/step  2.8K tok/s
+    step  10: loss=111.0673  622ms/step  3.3K tok/s
+    step  25: loss=6.9932  634ms/step  3.2K tok/s
+    step  50: loss=0.0113  639ms/step  3.2K tok/s
+    step 100: loss=0.0000  646ms/step  3.2K tok/s
+    step 150: loss=0.0000  618ms/step  3.3K tok/s
+    step 200: loss=0.0000  614ms/step  3.3K tok/s
+    FINAL: loss=0.0000  PPL=1  629ms/step  3.3K tok/s
+
+==============================================================================
+  BENCHMARK 3 — TRAINING PEAK VRAM vs SEQUENCE LENGTH
+==============================================================================
+
+  TRAINING PEAK VRAM (MB) — batch=1, single backward step
+  OrthoSSM_V11          S=512:   115MB  S=1024:   158MB  S=2048:   260MB  S=4096:   461MB  S=8192:   862MB
+  Mamba2_SSD            S=512:   669MB  S=1024:  1236MB  S=2048:  2454MB  S=4096:  4897MB  S=8192:  9784MB
+
+==============================================================================
+  SUMMARY
+==============================================================================
+
+  Metric                                 OrthoSSM_V11      Mamba2_SSD       Winner
+  ----------------------------------- --------------- --------------- ------------
+  Params (M)                                     4.57            3.71   Mamba2 (1.23×)
+  Throughput S=1024 (K tok/s)                    86.0             6.9   OrthoSSM (12.49×)
+  Inference VRAM S=1024 (MB)                     52.0            69.9   OrthoSSM (0.74×)
+  Throughput S=4096 (K tok/s)                   199.9             7.3   OrthoSSM (27.28×)
+  Inference VRAM S=4096 (MB)                    103.1           134.1   OrthoSSM (0.77×)
+  Throughput S=16384 (K tok/s)                  284.7             7.4   OrthoSSM (38.57×)
+  Inference VRAM S=16384 (MB)                   308.2           428.2   OrthoSSM (0.72×)
+  Training throughput (K tok/s)                  53.5             3.3   OrthoSSM (16.42×)
+  Final loss (200 steps)                       5.5723          0.0000   Mamba2 (3410127.35×)
+
+  Results saved to mamba2_vs_ortho_results.json

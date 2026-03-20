@@ -1,0 +1,383 @@
+================================================================================
+  CHIMERA BATTERY TEST RESULTS
+  Fecha: 2026-03-06 00:58:46
+  GPU: NVIDIA GeForce RTX 4050 Laptop GPU
+  VRAM: 6.4 GB
+  PyTorch: 2.5.1+cu124
+================================================================================
+
+RESUMEN EJECUTIVO
+────────────────────────────────────────────────────────────────────────────────
+  ✓  test_triton_kernels.py         PASS         7.2s  [ALTA]
+  ✓  test_3layer.py                 PASS        16.8s  [ALTA]
+  ✓  test_chimera_full.py           PASS        18.5s  [ALTA]
+  ✓  precision_tests.py             PASS         3.2s  [ALTA]
+  ✓  deep_analysis.py               PASS        21.4s  [MUY ALTA]
+  ✓  test_v10.py                    PASS         4.0s  [MEDIA]
+
+  TOTAL: 6/6 PASS  |  Tiempo total: 71.0s
+
+
+================================================================================
+TEST: test_triton_kernels.py
+Descripción: test_triton_kernels — Kahan precision, Lion constraint, Semantic GC, Router robustez (13 unit-tests con asserts)
+Profundidad: ALTA
+Status: PASS  |  RC: 0  |  Tiempo: 7.2s
+────────────────────────────────────────────────────────────────────────────────
+Dispositivo: cuda
+CUDA disponible: True
+GPU: NVIDIA GeForce RTX 4050 Laptop GPU
+
+
+============================================================
+Resultados: 13 PASS | 0 FAIL | 0 SKIP | 13 TOTAL
+
+--- STDERR ---
+test_kahan_accuracy (__main__.TestTTTKernel.test_kahan_accuracy)
+El error acumulado con Kahan debe ser ≥5× menor que sin Kahan. ... ok
+test_lion_backward_compat (__main__.TestTTTKernel.test_lion_backward_compat)
+lion_constrained_update_inplace sin mom_comp/dt_comp debe funcionar. ... ok
+test_lion_constraint (__main__.TestTTTKernel.test_lion_constraint)
+Cada step: |dt_bias_nuevo - dt_bias_viejo| ≤ 0.1 * |A|. ... ok
+test_lion_kahan_stable (__main__.TestTTTKernel.test_lion_kahan_stable)
+Tras 10 000 pasos con Kahan, dt y mom deben ser finitos. ... ok
+test_archive_gc_on_full (__main__.TestLandmarkNative.test_archive_gc_on_full)
+Cuando n_landmarks == max_landmarks, _store_landmark debe ejecutar GC. ... ok
+test_preload_context (__main__.TestLandmarkNative.test_preload_context)
+preload_context debe cargar K embeddings en el archivo. ... ok
+test_semantic_gc (__main__.TestLandmarkNative.test_semantic_gc)
+Después del GC, el par de embeddings más similares debe fusionarse. ... ok
+test_semantic_gc_preserves_diverse (__main__.TestLandmarkNative.test_semantic_gc_preserves_diverse)
+GC sobre embeddings ortogonales aún reduce en 1. ... ok
+test_collapse_ema (__main__.TestRouter.test_collapse_ema)
+fast_prob_ema debe subir si el router siempre elige FAST. ... ok
+test_router_floor (__main__.TestRouter.test_router_floor)
+Todas las probabilidades de salida deben ser ≥ min_prob_floor. ... ok
+test_router_no_floor (__main__.TestRouter.test_router_no_floor)
+Con min_prob_floor=0.0, el router actúa como softmax puro. ... ok
+test_router_sums_to_one (__main__.TestRouter.test_router_sums_to_one)
+Tras el floor y re-normalización, cada fila debe sumar a 1. ... ok
+test_router_temperature (__main__.TestRouter.test_router_temperature)
+Con T alta la distribución es más uniforme que con T baja. ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 4.156s
+
+OK
+
+
+================================================================================
+TEST: test_3layer.py
+Descripción: test_3layer — Stack 3 capas: bus_cache crece, landmarks acumulan, backward sin NaN/Inf, retrieval modifica output
+Profundidad: ALTA
+Status: PASS  |  RC: 0  |  Tiempo: 16.8s
+────────────────────────────────────────────────────────────────────────────────
+=================================================================
+  TEST: ChimeraStack 3 capas — bus creciente + archive
+=================================================================
+
+[1] bus_cache.shape crece por capa:
+  [✓] bus_cache crece correctamente: 1→2→3 en dim=1, final=[2, 3, 128]
+
+[2] Forward verbose (3 capas):
+  Capa 0: bus_cache=[2, 1, 128] | n_landmarks=2 | FAST=0.362 HYBRID=0.337 FULL=0.301
+  Capa 1: bus_cache=[2, 2, 128] | n_landmarks=2 | FAST=0.306 HYBRID=0.359 FULL=0.334
+  Capa 2: bus_cache=[2, 3, 128] | n_landmarks=2 | FAST=0.305 HYBRID=0.360 FULL=0.334
+  → Output shape: [2, 512, 256]
+  → bus_cache final: [2, 3, 128]
+  → Tiempo forward: 54.1 ms
+
+[3] Backward:
+  [✓] Backward OK — sin NaN/Inf en ningún gradiente
+
+[4] Landmarks con input complejo:
+  [✓] Total landmarks acumulados en 3 capas: 12
+  Estado por capa tras input complejo:
+    Capa 0: n_landmarks=4 | {'n_landmarks': 4, 'max_landmarks': 64, 'landmark_dim': 128, 'cache_valid': True, 'memory_kb': 2.0}
+    Capa 1: n_landmarks=4 | {'n_landmarks': 4, 'max_landmarks': 64, 'landmark_dim': 128, 'cache_valid': True, 'memory_kb': 2.0}
+    Capa 2: n_landmarks=4 | {'n_landmarks': 4, 'max_landmarks': 64, 'landmark_dim': 128, 'cache_valid': True, 'memory_kb': 2.0}
+
+[5] Retrieval con landmarks:
+  [✓] Diferencia output con/sin landmarks: 0.114106 (distinto ✓)
+
+=================================================================
+  SUCCESS: Todas las pruebas de 3 capas pasadas
+=================================================================
+
+
+================================================================================
+TEST: test_chimera_full.py
+Descripción: test_chimera_full — TTT Triton vs Python ref, WarmupScheduler 3 fases, ChimeraLosses entropy, step() autoregressive
+Profundidad: ALTA
+Status: PASS  |  RC: 0  |  Tiempo: 18.5s
+────────────────────────────────────────────────────────────────────────────────
+=================================================================
+  TEST INTEGRACIÓN CHIMERA — 4 componentes nuevos
+=================================================================
+
+[1] TTT Triton Kernel (Lion fusionado)
+  [✓] dt_bias max-err: 0.00e+00  momentum max-err: 4.47e-08
+  [✓] 500 updates en 30.5 ms → 61.0 µs/update
+  [✓] compute_token_errors_triton max-err vs PyTorch: 1.91e-06
+
+[2] ChimeraWarmupScheduler (3 fases)
+  [✓] Fase 1 (step=0): ttt_lr=0  slr_gate(σ)=0.0000
+  [✓] Fase 2 (step=100): ttt_lr=0.00050  slr_gate(σ)=0.0067
+  [✓] Fase 3 (step=200): ttt_lr=0.00100
+
+[3] ChimeraLosses (entropy + TTT pred)
+  [✓] routing_loss=0.0079  ttt_pred_loss=0.0998
+  aux: routing=0.0087  ttt_pred=0.0000  total_aux=0.0087
+  routing: FAST=0.327  HYBRID=0.352  FULL=0.321  H=1.098
+  [✓] Backward OK — total_loss=2.5087
+  [✓] Uniforme=0.0110 > Colapso=0.0011 (routing penaliza H alto → especialización) ✓
+
+[4] step() — decode token-by-token
+  Capa 0: bus_ring=[2, 16, 128]
+  Capa 1: bus_ring=[2, 16, 128]
+  Capa 2: bus_ring=[2, 16, 128]
+  [✓] 5 tokens decodificados, shape=[2, 1, 256]
+  [✓] Tiempo por token (step estándar): 15.5 ms
+
+[4b] Ring Bus — forma fija en decode
+  [✓] Ring shape constante en 10 pasos: [2, 16, 128]
+  [✓] ring_size=16 detectado de GPU profile (laptop_ada → 16)
+
+[5] return_aux — integración con ChimeraLosses
+  [✓] aux_list len=3, routing_probs[B=2,3] correctas
+
+[6] GPU Profile — JIT adaptativo
+  [✓] GPU detectado: NVIDIA GeForce RTX 4050 Laptop GPU (laptop_ada)
+  [✓] Triton flash configs generados: 4
+  [✓] ring_size=16  stages_flash=2
+  [✓] compile_mode_train='reduce-overhead'  FP8=False
+
+[7] Fp8Linear — FP8 forward con fallback BF16
+  [✓] Fp8Linear shape=torch.Size([4, 256])  rel_err=0.0378  FP8_AVAIL=True
+  [✓] apply_fp8_to_chimera: no-op correcto en laptop_ada
+
+[8] chunked_prefill — carry SSM+Bus entre chunks
+  [✓] drift carry  = 0.1%  (carry SSM+Bus)
+  [✓] drift naive  = 24.3%  (sin carry — reproduce T5)
+  [✓] mejora: 242.9×  shape=torch.Size([2, 1024, 256])
+
+[9] CUDAGraphPool — pool de CUDA Graphs por batch_size
+  [✓] Graphs capturados: [1, 2, 4]
+  [✓] B=1: shape=torch.Size([1, 1, 256])  B=2: shape=torch.Size([2, 1, 256])  B=3→pad4: shape=torch.Size([3, 1, 256])
+  [✓] _select_batch_size(3)=4 (padding automático)
+
+=================================================================
+  SUCCESS — todos los tests pasados en 14.5s
+=================================================================
+
+
+================================================================================
+TEST: precision_tests.py
+Descripción: precision_tests — Mega-kernel EMA vs kernel Triton directo, SLR Flash vs PyTorch fallback, BF16 guard
+Profundidad: ALTA
+Status: PASS  |  RC: 0  |  Tiempo: 3.2s
+────────────────────────────────────────────────────────────────────────────────
+=== OrthoSSM V11 Precision Tests ===
+Device: cuda
+GPU: NVIDIA GeForce RTX 4050 Laptop GPU
+
+── P1: Mega-kernel EMA output precision ──
+  ✓  EMA output cosine≥0.99  [cosine=1.00000]
+  ✓  EMA output normerr≤0.01  [norm_err=0.00128]
+  ✓  Coefficients updated by Lion  [changed=True]
+
+── P2: BF16 coefficients guard ──
+  ✓  BF16 guard: rel_err≤0.015  [rel_err=0.00787]
+
+── P3: SLR Triton diff-flash-attn vs PyTorch chunked ──
+  ✓  SLR Triton cosine≥0.98  [cosine=1.0000]
+  ✓  SLR Triton rel_err≤0.05  [rel_err=0.0011]
+
+── P4: Mega-kernel gradient flow ──
+  ✓  Gradient x finite  [max=8.2359]
+  ✓  Gradient coeffs finite  [max=233.1222]
+
+── P5: Latencia mega-kernel vs baseline ──
+  ✓  Mega-kernel latencia≤3ms  [2.01ms/forward (B=2,S=1024,D=128)]
+
+============================================================
+  Precision Tests: 9 passed, 0 failed out of 9
+============================================================
+
+
+================================================================================
+TEST: deep_analysis.py
+Descripción: deep_analysis — T1 Throughput/VRAM, T2 Estabilidad numérica, T3 Stress 4K tokens, T4 Latencia componentes, T5 Chunked error, T6 Gradientes FD, T7 Proyección 1M tokens, T8 step() autoregresivo
+Profundidad: MUY ALTA
+Status: PASS  |  RC: 0  |  Tiempo: 21.4s
+────────────────────────────────────────────────────────────────────────────────
+
+  Dispositivo : cuda
+  GPU         : NVIDIA GeForce RTX 4050 Laptop GPU
+  VRAM total  : 6.4 GB
+  SM          : 8.9
+  PyTorch     : 2.5.1+cu124
+
+========================================================================
+  T1 - Throughput & VRAM vs longitud de secuencia
+========================================================================
+        S=  256 |   7.53+-2.13 ms |    33,988 tok/s | VRAM d=267.7 MB | peak=271.4 MB
+        S=  512 |   5.61+-1.77 ms |    91,203 tok/s | VRAM d=7.3 MB | peak=19.8 MB
+        S= 1024 |   4.71+-1.34 ms |   217,405 tok/s | VRAM d=259.5 MB | peak=272.5 MB
+        S= 2048 |   8.42+-2.83 ms |   243,145 tok/s | VRAM d=263.7 MB | peak=277.7 MB
+        S= 4096 |   5.64+-1.29 ms |   726,426 tok/s | VRAM d=270.4 MB | peak=286.6 MB
+
+        --- Extrapolacion prefill (activaciones O(S)) ---
+        S=128K: VRAM=4.0 GB | latencia=0.2s | throughput=726,426 tok/s
+        S=  1M: VRAM=29.2 GB | latencia=1.4s | throughput=726,426 tok/s
+
+        --- Modo INFERENCE (step token-a-token, estado O(1)) ---
+        Estado SSM fijo (1 capa): 0.15 MB - INDEPENDIENTE de S
+        Con 32 capas:             4.78 MB - igual para 1M que para 1 token
+
+========================================================================
+  T2 - Estabilidad numerica & correccion de errores
+========================================================================
+  [OK]  normal NaN=False Inf=False RMS=1.1560 [OK]
+  [OK]  cero   NaN=False Inf=False RMS=0.0000 [OK]
+  [OK]  +/-1e6   NaN=False Inf=False RMS=1000000.0625
+  [OK]  +/-1e-8  NaN=False Inf=False RMS=0.0274
+  [OK]  Determinismo max_diff=0.00e+00 OK
+  [OK]  Gradientes 32/36 parametros con grad finita y >0
+
+        Grad norm por modulo:
+            mamba2: mean=0.0450  max=0.2275  n=8
+               ttt: mean=0.0003  max=0.0007  n=3
+               slr: mean=0.0050  max=0.0211  n=6
+           archive: mean=0.0169  max=0.0815  n=10
+               bus: mean=0.0266  max=0.0476  n=3
+            router: mean=0.0022  max=0.0057  n=5
+              norm: mean=0.0035  max=0.0035  n=1
+
+========================================================================
+  T3 - Stress test: contextos largos
+========================================================================
+  [OK]  S=  4096 |    12.7 ms |  321,688 tok/s | VRAM=82.3 MB | valid=True
+  [OK]  S=  8192 |   433.7 ms |   18,890 tok/s | VRAM=312.1 MB | valid=True
+  [OK]  S= 16384 |   444.1 ms |   36,894 tok/s | VRAM=347.5 MB | valid=True
+  [OK]  S= 32768 |   457.4 ms |   71,646 tok/s | VRAM=513.6 MB | valid=True
+
+        Escala O(?):
+            4096->  8192: tiempo x34.07 para x2 tokens  => O(S^5.09)
+            8192-> 16384: tiempo x1.02 para x2 tokens  => O(S^0.03)
+           16384-> 32768: tiempo x1.03 para x2 tokens  => O(S^0.04)
+
+========================================================================
+  T4 - Latencia por componente (S=2048)
+========================================================================
+  [OK]  Full forward       :   5.005 ms (100%)
+          mamba2 SSD scan  :   1.121 ms (22.4%)
+          router (3-tier)  :   0.363 ms (7.3%)
+          SLR+DiffAttn     :   1.674 ms (33.4%)
+          archive retrieve :   0.029 ms (0.6%)
+          RMSNorm          :   0.089 ms (1.8%)
+          TTT+Bus+Pipeline :   1.729 ms (34.6%)
+
+========================================================================
+  T5 - Acumulacion de error: chunked vs full forward
+========================================================================
+        Full vs chunked: max_err=3.4618  mean=0.2808  rmse=0.4214
+  [!!]  Drift: +108.4% (early=0.18208 -> late=0.37954)
+        Norma salida: min=15.654 max=21.317 mean=18.513 std=0.827
+
+========================================================================
+  T6 - Calidad de gradientes (finite-difference)
+========================================================================
+  [OK]  ttt_full_scale                                rel_err=1.0665  ALTO
+  [OK]  mamba2.dt_bias                                rel_err=2.1460  ALTO
+  [OK]  router.log_temp                               rel_err=0.4477  ALTO
+  [OK]  slr.lam_logit                                 rel_err=0.4426  ALTO
+  [OK]  bus.gate                                      rel_err=0.0935  ALTO
+
+========================================================================
+  T8 - Rendimiento step() token-a-token
+========================================================================
+  [OK]  Latencia : 2.515 +- 1.059 ms/tok
+  [OK]  Throughput: 397 tok/s
+  [OK]  VRAM pico : 22.0 MB
+        1M tokens @ 2.52 ms/tok = 2515 s = 0.7 h
+
+========================================================================
+  T7 - Proyeccion 1M tokens: VRAM, velocidad y estrategia
+========================================================================
+
+        MODO INFERENCE (step) — estado O(1):
+          ssm_state  : 128.0 KB/capa
+          conv_state : 10.0 KB/capa
+          bus_cache  : 128.0 KB/capa
+          TOTAL 1 capa: 266.0 KB  | 32 capas: 8.31 MB  <- FIJO, independiente de S
+
+        MODO PREFILL (chunked, obligatorio >4K en 6GB GPU):
+          Activaciones full 1M FP32 : 1.0 GB  <- imposible en 6GB
+          Chunk 4096 tokens FP32    : 4.2 MB  <- manejable
+          N chunks para 1M          : 245
+          Throughput ref S=4,096: 726,426 tok/s
+          Latencia extrapolada 1M   : 1.4 s
+          Tiempo chunked 1M         : 1.4 s (245 x 5.6 ms)
+
+        CHIMERA vs TRANSFORMER (1M tokens, 32 capas):
+          Transformer KV-cache 1M BF16 : 32.8 GB  <- imposible en 6GB
+          CHIMERA SSM state   1M FP32  : 8.31 MB   <- siempre cabe
+          Ventaja estado               : x4
+
+        PLAN DE ACCION (mejoras en backlog):
+          [D3] Streaming inference: buffer 16-tok, TTT update cada chunk
+          [D4] INT8 coefficients: x8 menos VRAM de estado SSM
+          [D5] Dynamic thresholds: routing por complejidad, no longitud
+          [D1] Adaptive degree per-head: heads locales degree=2 -> -25%% FLOPs
+          [ *] Chunked prefill con carry: bus_cache pasa entre chunks
+
+========================================================================
+  RESUMEN FINAL
+========================================================================
+  [OK]  T1_throughput: PASS
+  [OK]  T2_numerical: PASS
+  [OK]  T3_long_ctx: PASS
+  [OK]  T4_breakdown: PASS
+  [OK]  T5_error_accum: PASS
+  [OK]  T6_grad_quality: PASS
+  [OK]  T8_step: PASS
+
+  7/7 tests pasaron.
+
+  [OK]  Guardado en /home/OrthoSSM/chimera_experiment/deep_analysis_results.json
+
+
+================================================================================
+TEST: test_v10.py
+Descripción: test_v10 — Legacy V10 OrthoSSM (sdpc_kernel, sdpc_engine, model.py): T1-T17 incluyendo LUT, gradientes, SLR
+Profundidad: MEDIA
+Status: PASS  |  RC: 0  |  Tiempo: 4.0s
+────────────────────────────────────────────────────────────────────────────────
+
+=== OrthoSSM V10 'Lightning' Test Suite ===
+
+[92m✓[0m T1  Import V10 modules  [kernel, engine, model, archive, slr]
+[92m✓[0m T2  Forward shape (kernel)  [out=(2, 512, 64) coeffs=(2, 8, 4, 8) mom=(2, 8, 4, 8)]
+[92m✓[0m T3  Fast path (seq=128)  [time=64.1ms, coeffs_unchanged=True]
+[92m✓[0m T4  Hybrid path (seq=512)  [coeffs_changed=True]
+[92m✓[0m T5  Full path (seq=1024)  [out=(2, 1024, 64)]
+[92m✓[0m T6  Lion optimizer (no m2)  [state reduction: 33% (1536 → 1024 elements)]
+[92m✓[0m T7  LUT vs Clenshaw match  [cosine=1.0000, rel_err=0.0001]
+[92m✓[0m T8  Backward gradients  [grad_max=0.2871]
+[92m✓[0m T9  Multi-batch B=4  [out_max=0.2656]
+[92m✓[0m T10 AsyncLightBus  [publish/gather works, shape=torch.Size([2, 64])]
+[92m✓[0m T11 Full model (short+long)  [short=(2, 64, 1000) long=(2, 1024, 1000)]
+[92m✓[0m T12 V9 backward compat  [state_tuple_len=2]
+[92m✓[0m T13 Degree 4 vs 8  [deg4=1.0ms deg8=1.9ms speedup=1.93x]
+[92m✓[0m T14 Kernel speed  [V10=1.73ms per forward (seq=1024, B=2, D=64)]
+[92m✓[0m T15 SLR routing + selection  [K=64, nonzero=12.5%, scores_range=[0.596,1.116]]
+[92m✓[0m T16 SLR differential lambda  [init_λ=0.500, λ_diff_effect=1.0170]
+[92m✓[0m T17 SLR param reduction  [SLR=327,940 vs NSA=918,272 → 64% reduction]
+
+============================================================
+  V10 Tests: 17 passed, 0 failed out of 17
+============================================================
+
+
+

@@ -1,0 +1,777 @@
+================================================================================
+  ANÁLISIS PROFUNDO: NVIDIA H200 — COMPORTAMIENTO REAL EN PRODUCCIÓN
+  Basado en experiencia directa — CHIMERA-125M Training Run
+  Fecha de observación: 2026-03-07
+  Pod: root@103.196.86.23:12623 | Hostname: 74e5d10da94d
+================================================================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PARTE I: ESPECIFICACIONES CONTRASTADAS — ANUNCIO vs REALIDAD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Lo que el cloud provider anunciaba:
+    Imagen:          better-pytorch:cuda12.4-torch2.6.0
+    GPU:             NVIDIA H200
+    VRAM:            140 GB
+    CUDA:            12.4
+
+Lo que había en realidad (verificado con comandos directos):
+    GPU:             NVIDIA H200 SXM (Hopper, SM 9.0)
+    VRAM total:      143,771 MiB = 143.7 GiB (≈140 GiB comercial)
+    TDP:             700W máximo
+    Driver:          550.144.03
+    CUDA (driver):   12.4
+    CUDA toolkit:    12.8 (cu128)  ← DIFERENTE al anunciado
+    PyTorch:         2.10.0+cu128  ← MUY DIFERENTE al anunciado (era 2.6.0)
+    Python:          3.10.12       ← 3.10, no 3.12
+    OS:              Ubuntu 22.04 LTS (Jammy)
+    GCC:             11.4.0        ← ABI nueva (_GLIBCXX_USE_CXX11_ABI=1)
+
+LECCIÓN CRÍTICA #1:
+    El anuncio del pod NO es confiable para versiones de software.
+    SIEMPRE ejecutar antes de instalar nada:
+        python3 --version
+        python3 -c "import torch; print(torch.__version__, torch.version.cuda)"
+        python3 -c "import torch; print(torch._C._GLIBCXX_USE_CXX11_ABI)"
+        nvcc --version
+        nvidia-smi | head -10
+
+    La discrepancia torch 2.6.0 vs 2.10.0 causó el error de ABI y
+    desperdició tiempo de debugging. Un pod "actualizado" en silencio
+    puede romper cualquier .whl precompilado.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PARTE II: ARQUITECTURA DEL H200 — LO QUE IMPORTA PARA ML
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+2.1 Microarquitectura Hopper (SM 9.0)
+──────────────────────────────────────
+    SMs (Streaming Multiprocessors): 132
+    CUDA Cores por SM: 128
+    Total CUDA Cores: 16,896
+
+    Tensor Cores (4ª gen, Hopper):
+        - Soporte nativo: FP8 / BF16 / FP16 / TF32 / INT8
+        - Novedad H100/H200 vs A100: soporte FP8 E4M3 y E5M2
+        - Instrucción WGMMA (Warp-Group Matrix Multiply Accumulate):
+          opera tiles grandes 64×16×16 vs 16×8×16 de Ampere
+          → mejor utilización en matrices grandes
+        - TMA (Tensor Memory Accelerator): hardware dedicado para
+          mover tiles desde HBM3e a SRAM de forma asíncrona
+          sin consumir registros del SM
+
+    Compute specs reales (H200 SXM, 700W TDP):
+        FP8:    3,958 TFLOPs
+        BF16:     989 TFLOPs  ← la que usamos
+        FP16:     989 TFLOPs
+        TF32:     494 TFLOPs
+        FP32:     67  TFLOPs
+
+    Nota: H100 SXM tiene 989 TFLOPs BF16 igual que H200.
+    La diferencia es la memoria (HBM2e vs HBM3e) y la VRAM (80GB vs 141GB).
+
+2.2 Subsistema de Memoria — La Diferencia Real del H200
+──────────────────────────────────────────────────────────────
+    Tipo:            HBM3e (High Bandwidth Memory 3e)
+    Capacidad:       141 GiB (vs 80 GiB H100 SXM5)
+    Bandwidth:       4.8 TB/s  (vs 3.35 TB/s H100 SXM5, vs 2.0 TB/s A100)
+    Ancho de bus:   5,120 bits
+    L2 Cache:        50 MB  (shared entre todos los SMs)
+    SRAM por SM:     ~228 KB (registro + shared memory)
+    Latencia HBM3e:  ~200 ns (vs ~300 ns DDR5)
+
+    REGLA ARITMÉTICA DE ROOFLINE para H200:
+    ─────────────────────────────────────────
+    Arithmetic Intensity I_opt = peak_FLOPS / peak_BW
+                               = 989e12 / 4.8e12
+                               = 206 FLOPs/byte
+
+    → Cualquier operación con menos de 206 FLOPs por byte que lee es
+      MEMORY-BANDWIDTH BOUND en H200.
+    → A100 tenía I_opt = 312e12/2.0e12 = 156 FLOPs/byte.
+    → H200 eleva el umbral a 206, hace más operaciones bandwidth-bound.
+
+    Ejemplos prácticos de Arithmetic Intensity:
+        GEMM grande (matmul 4096×4096):   ~1000 FLOPs/byte → COMPUTE bound ✓
+        LayerNorm / RMSNorm:              ~5-8  FLOPs/byte → BW bound ❌
+        Mamba2 scan recurrente:           ~15-30 FLOPs/byte → BW bound ❌
+        Attention softmax (seq corta):    ~10   FLOPs/byte → BW bound ❌
+        Attention softmax (seq larga):    ~100+ FLOPs/byte → COMPUTE bound ✓
+
+    IMPLICACIÓN para Chimera: la mayor parte de la arquitectura SSM está
+    por debajo de 206 FLOPs/byte → la H200 desperdicia su potencia de
+    cómputo esperando datos de HBM3e.
+
+2.3 NVLink y PCIe (contexto multi-GPU)
+──────────────────────────────────────
+    H200 SXM:  NVLink 4.0 — 900 GB/s bidireccional por GPU
+    H200 NVL:  NVLink + NVSwitch — topología all-to-all hasta 8 GPUs
+    Este pod: 1 GPU sola (sin NVLink relevante)
+    PCIe: 5.0 x16 → 128 GB/s al host (irrelevante para training single-GPU)
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PARTE III: COMPORTAMIENTO OBSERVADO EN NUESTRA SESIÓN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+3.1 GPU Utilization vs Power — El Diagnóstico Key
+──────────────────────────────────────────────────
+    Observado:
+        nvidia-smi GPU-Util: 67% → 73% → 92% (variaba)
+        Potencia:            415W  de  700W máximo (59% TDP)
+
+    Lo que significan esos números:
+        "GPU-Util" en nvidia-smi NO mide qué fracción de los Tensor Cores
+        está computando. Mide qué fracción del tiempo hay AL MENOS UN kernel
+        activo en la GPU. Es un indicador binario (ocupado/libre) cada 1ms.
+
+        INTERPRETACIÓN CORRECTA:
+          • 92% util + 415W = la GPU está activa la mayoría del tiempo
+            PERO los kernels activos están esperando datos de HBM3e,
+            no saturando Tensor Cores. Los Tensor Cores permanecen ociosos
+            dentro del kernel mientras los load units buscan en HBM.
+
+          • Si fuera compute-bound (GEMMs grandes, batch grande):
+            → 92% util + 650-700W (93-100% TDP)
+
+          • Si fuera waiting/stalled (IO, sincronizaciones Python):
+            → <50% util + proporcional en power
+
+        DIAGNÓSTICO CONFIRMADO: memory-bandwidth bound
+        con overhead adicional de mmap IO (~variaciones 67-92% util)
+
+3.2 El "74% VRAM" Fantasma de nvidia-smi
+──────────────────────────────────────────
+    nvidia-smi reportó: 112,312 MiB "en uso"
+    PyTorch reported:    2,100 MiB tensores activos
+
+    Diferencia: 109,900 MiB = ~110 GiB "ocupados sin tensores"
+
+    Esto se llama PyTorch Caching Allocator (también: BFC Allocator):
+    ─────────────────────────────────────────────────────────────────
+    PyTorch NUNCA devuelve memoria CUDA al sistema operativo una vez
+    reservada. El ciclo de vida de memoria es:
+
+    [Primera vez]
+        cudaMalloc(100 MB)  → reserva 100 MB del OS
+        tensor = alloc(100 MB) → vive 1 ms y se libera
+        → PyTorch: "ok, guardo este bloque en mi free-list"
+        → OS y nvidia-smi: "esos 100 MB siguen usados"
+
+    [Segunda vez]
+        tensor2 = alloc(80 MB)
+        → PyTorch: "tengo 100 MB libre, te doy 80 MB sin llamar a cudaMalloc"
+        → Cero latencia, cero fragmentación, cero syscall
+
+    Por qué importa entender esto:
+      1. nvidia-smi NO sirve para saber cuánta VRAM queda disponible
+         para PyTorch. SIEMPRE usar torch.cuda.memory_allocated() y
+         torch.cuda.memory_reserved() para diagnóstico real.
+      2. El 110 GiB "phantom" fue acumulado durante el backward pass:
+         gradients temporales, optimizer states, activaciones. Todos
+         se "liberaron" lógicamente pero el allocator los retuvo.
+      3. IMPLICACIÓN: teníamos ~140 GiB REALMENTE disponibles para
+         escalar el batch. La GPU no estaba cerca de OOM real.
+
+    Comandos correctos de diagnóstico de memoria:
+        python3 -c "import torch; t=torch.cuda; print(
+            f'allocated: {t.memory_allocated()/1e9:.2f} GB',
+            f'reserved:  {t.memory_reserved()/1e9:.2f} GB',
+            f'free_in_reserved: {(t.memory_reserved()-t.memory_allocated())/1e9:.2f} GB'
+        )"
+
+    O durante training (en el log): el campo VRAM=X.X/150GB del trainer
+    ya reporta memory_allocated(), no memory_reserved().
+
+3.3 Por Qué Ocurrió OOM con batch=64 + --compile
+──────────────────────────────────────────────────
+    Los 136 GiB que nvidia-smi reportó "usados" antes del OOM incluían:
+
+    a) PyTorch caching allocator (acumulado de runs previos):  ~40-50 GiB
+    b) torch.compile buffers de Triton Inductor:               ~30-40 GiB
+       El Inductor necesita analizar, optimizar y cachear kernels.
+       Pre-aloca working memory para autotuning.
+    c) Activaciones de forward (batch=64, seq=2048, 12 layers): ~15-20 GiB
+    d) Pesos del modelo (206M × 2 bytes BF16):                  ~0.4 GiB
+    e) Gradientes (igual que pesos):                            ~0.4 GiB
+    f) Optimizer states (2 estados por param para AdamW):       ~1.6 GiB
+    g) lm_head output  [B×chunks × vocab=128002]:              ~3.9 GiB ← el que crasheó
+
+    Con batch=32 sin --compile: solo a+d+e+f+g,
+    donde a se reduce porque no hubo --compile buffers grandes.
+    → Cabe holgado.
+
+3.4 MFU Real Medido
+────────────────────
+    Fórmula:
+        MFU = FLOPs_utilizados_por_segundo / FLOPs_pico_GPU
+
+    FLOPs por token (aproximación estándar GPT):
+        = 6 × N_params    (2 para forward + 4 para backward)
+        = 6 × 206e6 = 1.236e9 FLOPs/token
+
+    Throughput medido: ~46,000 tok/s
+
+    FLOPs/s efectivos = 46,000 × 1.236e9 = 56.9 TFLOPs/s
+    MFU = 56.9 / 989 = 5.75%
+
+    Contexto de referencia MFU típico (BF16, single GPU):
+        GPT-2 (transformer denso) bien optimizado H100:   35-45%
+        LLaMA-7B en H100 con FA3:                         38-42%
+        Mamba-2.8B en H100 con scan bien escrito:         18-22%
+        RWKV-7 en H100:                                   15-20%
+        Chimera-125M en H200 (esta sesión):                5.7%  ← 3-4× peor que SSM puro
+
+    Por qué Chimera tiene MFU bajo incluso para SSM:
+      1. Batch=32 muy pequeño → problemas de ocupancia SM (pocos warps activos)
+      2. Sin CUDA Graphs → Python overhead entre kernels (gaps en pipeline)
+      3. Bus async entre capas (AsyncLightBus) → sincronizaciones extra
+      4. TTT inner loop → gradient computation dentro del forward
+         (doble uso de memoria de activaciones, stalls de pipeline)
+      5. mmap IO → variabilidad en get_batch() timing
+      6. Kernels no fusionados → múltiples passes a HBM donde uno bastaría
+
+3.5 Cómo se Comporta el H200 Bajo Diferentes Workloads (inferido)
+────────────────────────────────────────────────────────────────────
+    ESCENARIO 1 — Gran GEMM (lo que el H200 hace mejor):
+        Operación: matmul [4096, 4096] × [4096, 4096]
+        Arith intensity: ~2730 FLOPs/byte >> umbral roofline 206
+        → COMPUTE BOUND
+        → 85-90% TDP, GPU util ~95%+, ~900 TFLOPs efectivos
+        → Ideal para large-batch transformer inference/training
+
+    ESCENARIO 2 — Mamba2 SSM scan (nuestro caso):
+        Operación: scan recurrente [B, T, D_state]
+        Arith intensity: ~20-40 FLOPs/byte << umbral 206
+        → MEMORY BANDWIDTH BOUND
+        → ~60% TDP, GPU util 70-90% (kernels activos pero esperando BW)
+        → Mejor en H200 que A100 solo si batch es suficientemente grande
+
+    ESCENARIO 3 — LLM inference autoregresiva (batch=1):
+        Operación: matmul [1, D] × [D, D] (batch=1 en cada step)
+        Arith intensity: extremadamente bajo (~2-5 FLOPs/byte)
+        → ABSOLUTAMENTE BW BOUND
+        → <5% TDP, GPU util ~30-40%
+        → H200 tiene VENTAJA sobre H100 principalmente por mayor VRAM
+           (caben modelos más grandes) no por compute
+
+    ESCENARIO 4 — FA3 con secuencias largas (>4096 tokens):
+        L² complejidad de atención, kernels tileados con TMA
+        → COMPUTE BOUND a seq_len > 4096
+        → ~80-90% TDP donde el H200 brilla vs A100
+        → SSMs no se benefician igual de secuencias largas
+
+3.6 Temperaturas y Sostenibilidad Térmica
+──────────────────────────────────────────
+    Temperatura GPU observada: 44-49°C durante entrenamiento
+    (medida con nvidia-smi --query-gpu=temperature.gpu)
+
+    Para referencia:
+        H200 SXM: throttle temperature = 83°C, shutdown = 92°C
+        44-49°C es extremadamente frío → confirma que 415W << TDP de 700W
+        Si estuviéramos a 700W (compute-bound), esperaríamos 65-75°C
+
+    IMPLICACIÓN: no hay thermal throttling en absoluto.
+    La GPU podría correr más caliente y rápido muy fácilmente.
+    El cuello no es térmico/energético, es bandwidth.
+
+3.7 El Problema del Primera Run: CUDA Graph Capture
+──────────────────────────────────────────────────────
+    Por qué los primeros ~10 steps son MUCHO más lentos:
+
+    En los primeros pasos, CUDA debe:
+      1. Compilar kernels JIT (cuBLAS autotuning para shapes específicos)
+      2. Cachear los kernels compilados en disco (~/.cache/torch/inductor/)
+      3. Warm up el allocator (primeras allocaciones son cudaMalloc len)
+      4. Inicializar cuDNN benchmark (si está activo)
+
+    Después del warm up (step ~50-100):
+      - Kernels compilados en cache
+      - Allocator con pool estable
+      - tps aumenta progresivamente: 22,026 → 45,928 tok/s en nuestro run
+
+    LECCIÓN: El ETA en los primeros 30-50 steps es ficticio.
+    Usar tps_avg a partir del step ~100 para estimar tiempo real.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PARTE IV: DIFICULTADES TÉCNICAS ENCONTRADAS Y LECCIONES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+4.1 ABI Mismatch — La Trampa Más Común en Pods de ML
+──────────────────────────────────────────────────────
+    Qué es la ABI de C++:
+        Application Binary Interface define cómo se serializan los nombres
+        de símbolos C++ en las librerías compartidas (.so).
+        GCC >= 5 tiene dos modos:
+          _GLIBCXX_USE_CXX11_ABI=0  → "vieja ABI"  (strings como struct + ptr)
+          _GLIBCXX_USE_CXX11_ABI=1  → "nueva ABI"  (std::string inline SSO)
+
+    El problema con mamba_ssm:
+        Los .whl de mamba_ssm en PyPI/releases vienen en variantes:
+          *cxx11abiTRUE*  → nueva ABI (GCC >= 7, Ubuntu 18+, RHEL 8+)
+          *cxx11abiFALSE* → vieja ABI (backward compat, algunos Docker)
+
+        Si el .whl y el PyTorch instalado tienen ABI diferente:
+            ImportError: undefined symbol: _ZN3c1017RegisterOperatorsD1Ev
+        
+        _ZN3c1017RegisterOperatorsD1Ev es el destructor de RegisterOperators
+        en el namespace c10 de PyTorch. Su mangling C++ difiere entre ABIs.
+
+    Detección rápida:
+        python3 -c "import torch; print(torch._C._GLIBCXX_USE_CXX11_ABI)"
+        # True  → necesitas .whl con cxx11abiTRUE
+        # False → necesitas .whl con cxx11abiFALSE o compilar desde fuente
+
+    Solución universal (siempre funciona, sin importar ABI ni versión):
+        export TORCH_CUDA_ARCH_LIST="9.0"   # H200
+        pip uninstall mamba_ssm causal_conv1d -y
+        pip install causal_conv1d --no-build-isolation
+        pip install mamba_ssm --no-build-isolation
+        # Esto compila desde fuente usando exactamente el PyTorch instalado
+
+    TORCH_CUDA_ARCH_LIST por GPU:
+        A100:  "8.0"
+        H100:  "9.0"
+        H200:  "9.0"     ← mismo SM que H100, Hopper
+        B200:  "10.0"    ← Blackwell (futuro)
+        RTX 4090: "8.9"
+        RTX 4080: "8.9"
+        RTX 3090: "8.6"
+        L40S:  "8.9"
+
+    Tiempo de compilación (referencia):
+        causal_conv1d: ~3-5 minutos en H200
+        mamba_ssm:     ~6-10 minutos en H200
+        (depende de TORCH_CUDA_ARCH_LIST — SM90 es extenso)
+
+4.2 torch.compile y OOM — Una Relación Compleja
+─────────────────────────────────────────────────
+    torch.compile usa Triton (Inductor backend) para fusionar kernels.
+    En entrenamiento de LLMs, tiene 3 fases con picos de memoria diferentes:
+
+    FASE 1 — Tracing (primeros 2-4 steps):
+        torch.compile traza el grafo computacional con FakeTensor.
+        Overhead de memoria CPU alto (~2-5 GB RAM CPU), GPU normal.
+
+    FASE 2 — Autotuning (steps 5-20 aprox):
+        Inductor prueba múltiples configuraciones de tiling para cada kernel.
+        PICO DE VRAM: puede ser 2-3× el uso normal durante este período.
+        Esto causó nuestro OOM con batch=64:
+          - Uso normal batch=64: ~8-10 GB
+          - Pico durante autotuning: 136 GB → OOM
+
+    FASE 3 — Steady state (después del warm up):
+        Kernels cacheados, sin overhead. 20-40% más rápido que eager.
+        Uso de VRAM vuelve a normal.
+
+    Estrategia para usar --compile con batch grande:
+        1. Primera corrida SOLO con batch pequeño y --compile:
+               --batch 8 --compile --total_tokens 1e7  (solo warmup)
+           Esto cachea los kernels en ~/.cache/torch/inductor/
+        2. Segunda corrida sin --compile pero con batch grande:
+               --batch 256 --no_compile
+           Los autotuning decisions persisten en cache, Inductor los reusa
+           automáticamente para las mismas shapes.
+
+    Alternativo: usar gradient_checkpointing para reducir pico de activaciones
+    durante compile phase → reduce el pico de VRAM en ~30-40%.
+
+4.3 mmap vs HBM Dataset — Impacto Medido
+──────────────────────────────────────────
+    Con --no_hbm (mmap):
+        Cada batch requiere:
+          1. numpy random access a memmap (disco → RAM virtual, ~0.1-0.5 ms)
+          2. .astype(int64) → copia en RAM CPU (65,536 tokens × 8 bytes = 512 KB)
+          3. copy_ a tensor pinned (CPU pinned = no-pageable, faster DMA)
+          4. Async H2D en stream_data (512 KB × 2 = 1 MB/step, ~0.02 ms)
+        Total overhead: ~0.5-1.5 ms/step (solapado con compute)
+
+    Con --hbm_dataset (todos los tokens en GPU):
+        Dataset: 2.6B tokens × 4 bytes (uint32) = 10.4 GB
+        H200 VRAM: 143 GB → cabe 13× el dataset completo
+        Cada batch:
+          1. torch.randint para índices (en GPU, ~0.01 ms)
+          2. tensor indexing directo en HBM (zero-copy, ~0.1 ms)
+        Total overhead: ~0.1 ms/step (10-15× más rápido)
+        VRAM adicional usada: 10.4 GB (de 143 GB) → completamente aceptable
+
+    LECCIÓN: Para datasets ≤ 30% de la VRAM, siempre usar --hbm_dataset.
+    La H200 tiene más VRAM precisamente para esto.
+
+4.4 CUDA Graphs — Cuándo Usarlos y Cuándo No
+─────────────────────────────────────────────────
+    Sin CUDA Graphs (--no_cuda_graphs):
+        Cada step: Python lanza secuencialmente cada kernel CUDA.
+        Overhead por kernel launch: ~8-15 μs.
+        Kernels en un forward+backward de 125M SSM: ~400-600.
+        Overhead total: ~3-7 ms/step.
+        Con step_time ≈ 1.4s → ~0.3-0.5% overhead por Python dispatch.
+        Además: gaps entre kernels donde la GPU queda idle ~1-2 μs c/u.
+
+    Con CUDA Graphs:
+        Se captura la secuencia completa de kernels una vez (graph capture).
+        El replay es un solo cudaGraphLaunch() → cero overhead Python.
+        GPU recibe todos los kernels como una unidad → pipeline perfecto.
+        Reducción del tiempo de step: ~10-20% típicamente.
+
+    Por qué --no_cuda_graphs fue necesario inicialmente:
+        CUDA Graphs requiere shapes fijas en cada step.
+        Si hay branches dinámicos (como el Bus async de Chimera),
+        graph capture puede fallar o requerir graph segmentation.
+        En nuestra corrida, --no_cuda_graphs fue el path seguro.
+
+    Para habilitarlos correctamente en Chimera:
+        1. Asegurar que get_batch() siempre devuelve shapes fijas
+        2. Eliminar branches Python dentro del modelo (if statements)
+        3. Test: ejecutar con --cuda_graphs primero con --benchmark
+        4. Si capture falla, buscar el módulo con dynamic shapes
+
+4.5 El Problema del Proceso PID Invisible en nvidia-smi
+────────────────────────────────────────────────────────
+    Observamos que nvidia-smi no listaba el proceso 8925 en la sección
+    "Processes" aunque estaba usando 112 GB de VRAM:
+
+    +-----------------------------------------------------------------------------------------+
+    | Processes:                                                                              |
+    |  GPU   GI   CI        PID   Type   Process name                              GPU Memory |
+    |=========================================|     (vacío)                                   |
+    +-----------------------------------------------------------------------------------------+
+
+    Causas posibles de PID invisible en nvidia-smi:
+      1. El proceso fue lanzado con nohup → se desconecta del terminal
+         pero algunos drivers no actualizan la tabla de procesos
+      2. El driver 550.x tiene un bug conocido en reporting de procesos nohup
+      3. MIG mode (Multi-Instance GPU) activo puede ocultar procesos
+         (aunque MIG estaba Disabled en nuestro pod)
+
+    Diagnóstico alternativo cuando nvidia-smi no muestra el proceso:
+        ps aux | grep train_h200    → confirmar que el PID existe
+        cat /proc/PID/status        → ver VmRSS (RAM CPU) y VmPeak
+        /proc/PID/fdinfo/           → descriptores abiertos
+
+    El proceso ESTABA corriendo (lo confirmamos, VmRSS=12.6 GB RAM CPU,
+    VmPeak=369 GB virtual). La utilización del 92% era real.
+
+4.6 Convergencia y Comportamiento de Loss
+──────────────────────────────────────────
+    Loss inicial: 12.014 (step 10)
+    Loss final observado: 6.228 (step 1000)
+    
+    Para un modelo con vocab=128,002:
+        Loss aleatorio esperado = ln(128,002) ≈ 11.76
+        Nuestro step 10 ya está bien encima (12.014) — indica que la
+        inicialización produce logits con algo de estructura (no uniforme)
+        pero la high entropy initial phase es normal.
+
+    Velocidad de convergencia: 5.8 nats de loss en 1000 steps
+        Comparable con GPT-2 small en training estándar (BPE, WebText).
+        No extraordinario, no problemático.
+        Con 39,672 pasos totales y la trayectoria actual, esperaríamos
+        loss final ~3.8-4.2 (bpb ~5.5-6.0) para 2.6B tokens a 125M params.
+        Para comparación: GPT-2 117M en WebText → ~2.97 nats en 300B tokens.
+
+    Gradient norm: 0.2-0.3 en steady state
+        muy bueno — indica que Muon+gradient clipping funciona bien.
+        Picos ocasionales hasta 8-19 en warmup son normales.
+
+    Métricas del router SSM (observadas):
+        pF (routing Fast/Mamba2):   0.4-0.5
+        pH (routing Hybrid/TTT):    0.05-0.08
+        H (entropy del router):     ~1.2-1.6 bits
+        maxFema (max freq EMA):      0.50-0.59
+        Interpretación: el modelo prefiere capas Fast (SSM rápido) sobre
+        Hybrid (TTT lento). Esto tiene sentido: en los primeros 1000 steps,
+        el TTT inner loop no ha aprendido nada útil aún → el router lo penaliza.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PARTE V: ANÁLISIS DE RENDIMIENTO — BOTTLENECK MAP COMPLETO
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+5.1 El Roofline Model del H200 (teórico)
+─────────────────────────────────────────
+    Para cualquier operación con Arithmetic Intensity I (FLOPs/byte):
+
+        Si I < 206:  performance = I × 4.8 TB/s  (bandwidth-limited)
+        Si I > 206:  performance = 989 TFLOPs     (compute-limited)
+
+    Nuestras operaciones principales y su posición en el roofline:
+
+    Operación                   I (FLOPs/byte)   Bound
+    ─────────────────────────────────────────────────────
+    lm_head (vocab proj, B=32)         ~10        BW ❌
+    Mamba2 scan (B=32, T=2048)         ~25        BW ❌
+    NS5 en float32 (matrices 2D)       ~40        BW ❌
+    TTT inner gradient               ~5-10        BW ❌
+    RMSNorm (B=32, D=768)              ~3         BW ❌
+    SLR attention (sliding window)    ~50-80      BW ❌
+    Embedding lookup (B=32)            ~2         BW ❌
+    MLP W1/W2 (B=32)                  ~30         BW ❌
+
+    CONCLUSIÓN: con batch=32, NADA está compute-bound en H200.
+    Todo está en el régimen bandwidth-limited.
+
+5.2 El Efecto del Batch Size en el Roofline
+───────────────────────────────────────────
+    La Arithmetic Intensity aumenta con el batch:
+
+    Para un matmul [B×seq, D_in] × [D_in, D_out]:
+        FLOPs = 2 × B × seq × D_in × D_out
+        Bytes = (B×seq×D_in + D_in×D_out + B×seq×D_out) × elem_size
+
+    Con D_in=D_out=768, seq=2048:
+        B=32:   I ≈ 2×32×2048×768 / (32×2048×768 + 768² + 32×2048×768) × (1/2bytes)
+              ≈ 32 FLOPs/byte  → BW bound
+
+        B=256:  I ≈ 256 FLOPs/byte  ≈ JUSTO en el umbral del H200 🎯
+
+        B=512:  I ≈ 512 FLOPs/byte  → compute bound para matrices grandes
+
+    INSIGHT: batch=256 es el "sweet spot" para H200 + modelo 125M con D=768.
+    Por debajo de 256, siempre bandwidth-bound. Por encima, los SSM scans
+    siguen siendo BW-bound pero los MLPs empiezan a saturas Tensor Cores.
+
+5.3 Beneficio Real de HBM3e sobre H100 para Nuestro Workload
+──────────────────────────────────────────────────────────────
+    H200 HBM3e bandwidth: 4.8 TB/s
+    H100 SXM5 HBM3e bandwidth: 3.35 TB/s
+    Ratio: 4.8/3.35 = 1.43×
+
+    Para workloads BANDWIDTH BOUND (como nuestro Chimera-125M con batch=32):
+        H200 debería ser ~1.43× más rápido que H100.
+        El speedup real es cercano a esto en SSM con batch pequeño.
+
+    Para workloads COMPUTE BOUND (transformer grande, batch grande):
+        H200 ≈ H100 (misma capacidad de compute BF16: 989 TFLOPs)
+        La ventaja del H200 es principalmente más VRAM (141 vs 80 GB).
+
+    CONCLUSIÓN PRÁCTICA: para modelos de 125M, la H200 no tiene ventaja
+    de compute sobre la H100. La ventaja es VRAM y BW para batch pequeño.
+    Para usar el full potencial del H200, se necesita modelo mucho más grande
+    (7B+) donde las GEMMs sean compute-bound.
+
+5.4 PyTorch Allocator — Comportamiento Temporal Observado
+────────────────────────────────────────────────────────────
+    Step 0-10:   VRAM reservada crece rápido (~20-40 GB en primeros steps)
+                 Por: cudaMalloc para gradients, optimizer states, activations
+    Step 10-100: VRAM reservada se estabiliza (allocator ya tiene pools llenos)
+    Step 100+:   VRAM reservada constante, allocator reutiliza todo
+                 Observado en nuestro run: VRAM=2.1/150GB constante de step 30+
+
+    El pico de 112 GB reservados fue acumulado ÚNICAMENTE por:
+      - El intento fallido con batch=64 + --compile (creó y liberó tensores grandes)
+      - Los buffers de Triton Inductor que llenaron el pool del allocator
+    Al relanzar sin matar el proceso de Python, el allocator hereda el pool grande.
+    Al lanzar un proceso Python fresco (nuevo nohup), el pool empieza vacío.
+
+    ESTRATEGIA: siempre matar el proceso anterior y lanzar uno nuevo.
+    El ghost memory de nvidia-smi desaparece al matar el proceso.
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PARTE VI: GUÍA DE DIAGNÓSTICO RÁPIDO H200
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+6.1 Comandos de Diagnóstico Esenciales
+──────────────────────────────────────
+    # Estado completo de GPU en una línea
+    nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu,
+                              power.draw,power.limit,temperature.gpu,
+                              clocks.current.sm,clocks.current.memory \
+               --format=csv,noheader
+
+    # Verificar entorno Python/CUDA
+    python3 -c "import torch; print(f'PyTorch {torch.__version__}'); \
+                print(f'CUDA {torch.version.cuda}'); \
+                print(f'ABI {torch._C._GLIBCXX_USE_CXX11_ABI}'); \
+                print(f'VRAM {torch.cuda.get_device_properties(0).total_memory/1e9:.1f} GB')"
+
+    # Memoria real vs fantasma
+    python3 -c "import torch; torch.cuda.init(); \
+                print(f'allocated: {torch.cuda.memory_allocated()/1e9:.2f} GB'); \
+                print(f'reserved:  {torch.cuda.memory_reserved()/1e9:.2f} GB')"
+
+    # Verificar que mamba_ssm funciona
+    python3 -c "from mamba_ssm import Mamba2; print('mamba_ssm OK')"
+
+    # Proceso de training y su VRAM
+    ps aux | grep train_h200 | grep -v grep
+    cat /proc/$(pgrep -f train_h200)/status | grep -E 'VmRSS|Vm Peak'
+
+6.2 Interpretación de Métricas nvidia-smi (tabla de referencia)
+────────────────────────────────────────────────────────────────
+    GPU-Util  | Power   | Diagnóstico
+    ──────────────────────────────────────────────────────────────
+    90-100%   | 600-700W| Compute-bound ideal (GEMMs grandes, batch grande)
+    70-90%    | 400-500W| BW-bound (SSM, small batch, normas, pointwise)
+    40-70%    | 200-400W| Mixed: compute + IO, posible fragmentación
+    <40%      | <200W   | IO-bound (mmap, PCIe transfers, Python overhead)
+    ~0%       | <50W    | Idle o stuck (Python deadlock, IO wait)
+
+6.3 Señales de Salud del Entrenamiento
+────────────────────────────────────────
+    SALUDABLE:
+        - loss baja consistentemente (sin plateaus de >100 steps sin mejora)
+        - grad_norm en 0.1-5.0 en steady state
+        - skip_steps = 0.0% (sin NaN/Inf en gradientes)
+        - tps_avg aumenta o es estable (no decrece)
+        - router entropy H > 1.0 bits (routing activo, no colapsado)
+        - pF + pH suman ≈ 1.0 (ambas rutas en uso)
+
+    PROBLEMÁTICO:
+        - loss spike (pierde >1 nat en 1 step) → lr muy alto, bug en datos
+        - grad_norm > 50 repetidamente → explosión de gradientes
+        - skip_steps > 2% → NaN frecuente, revisar dtype y learning rate
+        - router H < 0.5 bits por >20 steps → colapso de routing
+        - tps decreciente → memory leak или fragmentación
+        - OOM → batch demasiado grande o --compile con gran batch
+
+6.4 Decisiones de Configuración Óptima para H200 + SSM-125M
+───────────────────────────────────────────────────────────────
+    Variable         | Sub-óptimo        | Óptimo H200
+    ───────────────────────────────────────────────────
+    batch_size       | 8-32              | 128-256
+    hbm_dataset      | False (mmap)      | True (si VRAM >= 12 GB)
+    cuda_graphs      | False             | True (si modelo sin dynamic shapes)
+    torch.compile    | True en batch>64  | Solo después de kernel warmup
+    dtype            | float32           | bfloat16 (WGMMA nativo)
+    TF32 residuals   | disabled          | torch.set_float32_matmul_precision('high')
+    FlashAttention   | sdp disabled      | enable_flash_sdp=True (H200 tiene FA3)
+    TORCH_CUDA_ARCH  | "8.0;9.0"         | "9.0" solamente (elimina overhead de multi-arch)
+
+6.5 Ciclo de Compilación de Kernels (tiempos de referencia H200)
+────────────────────────────────────────────────────────────────
+    causal_conv1d     desde fuente: ~3-4 min
+    mamba_ssm 2.3.0   desde fuente: ~7-10 min
+    triton kernels    (JIT en primer forward): ~2-5 min
+    torch.compile     (primer trace + autotuning): ~3-6 min
+
+    TOTAL primera vez: ~15-25 minutos para el stack completo
+    Desde segundo lanzamiento (cache): todo instantáneo (<30 seg)
+
+    Cache de kernel compilados:
+        Triton/Inductor: ~/.cache/torch/inductor/
+        CUDA kernels:    ~/.nv/ComputeCache/
+        nvcc cache:      ~/.cache/nvcc/
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PARTE VII: COMPARATIVA H200 vs OTRAS GPUs PARA ESTE WORKLOAD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Para CHIMERA-125M con configuración actual (batch=32, sin optimizaciones):
+
+GPU       | VRAM  | BW      | MFU estimado | ETA 2.6B tok | Ventaja
+──────────────────────────────────────────────────────────────────────────────
+H200 SXM  | 141GB | 4.8TB/s |  5.7%        |  ~15.5h      | Línea base
+H100 SXM5 |  80GB | 3.35TB/s|  4.0%        |  ~22h        | -30%
+A100 SXM4 |  80GB | 2.0TB/s |  2.4%        |  ~37h        | -58%
+RTX 4090  |  24GB | 1.008TB/s|  1.2%        |  >60h (OOM?) | -80%
+RTX 4050  |   6GB | 0.192TB/s|  0.2%        |  >>100h (OOM)| impracticable
+
+Con CONFIGURACIÓN ÓPTIMA (batch=256, hbm, cuda_graphs):
+GPU       | VRAM  | BW      | tps estimado | ETA 2.6B tok
+──────────────────────────────────────────────────────────────
+H200 SXM  | 141GB | 4.8TB/s |  ~320,000    |  ~2.3h       ← objetivo real
+H100 SXM5 |  80GB | 3.35TB/s|  ~210,000    |  ~3.5h
+A100 SXM4 |  80GB | 2.0TB/s |  ~130,000    |  ~5.7h
+
+La H200 muestra su VERDADERO potencial SOLO con batch grande + hbm + cuda_graphs.
+Con batch=32, cuesta el mismo compute que un A100 (mismo FLOP, diferente BW).
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PARTE VIII: RECOMENDACIONES PARA FUTURAS SESIONES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+8.1 Script de Setup Automático (ejecutar al conectar a un pod nuevo)
+──────────────────────────────────────────────────────────────────────
+    #!/bin/bash
+    # setup_h200_pod.sh — ejecutar una vez al crear el pod
+
+    echo "=== Verificando entorno ==="
+    python3 --version
+    python3 -c "import torch; print(f'PyTorch: {torch.__version__}')"
+    python3 -c "import torch; print(f'ABI: {torch._C._GLIBCXX_USE_CXX11_ABI}')"
+    nvidia-smi | head -12
+
+    echo "=== Instalando dependencias (si ABI mismatch) ==="
+    export TORCH_CUDA_ARCH_LIST="9.0"
+    pip uninstall mamba_ssm causal_conv1d -y 2>/dev/null
+    pip install causal_conv1d --no-build-isolation
+    pip install mamba_ssm --no-build-isolation
+
+    echo "=== Verificando mamba_ssm ==="
+    python3 -c "from mamba_ssm import Mamba2; print('mamba_ssm OK')"
+
+    echo "=== Creando directorios ==="
+    mkdir -p /root/ckpt_chimera /root/chimera_h200
+
+    echo "=== Setup completo ==="
+
+8.2 Métricas de Éxito para el Próximo Run
+──────────────────────────────────────────
+    Objetivo de rendimiento:
+        tps_avg > 200,000 tok/s    (vs 46,000 actual → 4.3× mejora)
+        MFU > 15%                  (vs 5.7% actual   → 2.6× mejora)
+        GPU power > 500W           (vs 415W actual   → > 71% TDP)
+        ETA 2.6B tokens < 5 horas  (vs 15.5h actual  → 3× mejora)
+
+    Estos son alcanzables con batch=256 + hbm + cuda_graphs
+    SIN cambiar la arquitectura.
+
+    Objetivo de pérdida (si se corre run completo de 2.6B tokens):
+        loss final < 3.5 nats (bpb < 5.0) — comparable con GPT-2 117M
+        ppl < 35 en test set WebText/Marin
+
+8.3 Cosas que NO hacer en H200
+───────────────────────────────
+    ❌ Confiar en nvidia-smi para saber VRAM real disponible
+    ❌ Usar .whl precompilados sin verificar versión Python+PyTorch+ABI
+    ❌ Habilitar --compile con batch grande en primera corrida
+    ❌ Usar --no_hbm cuando el dataset cabe en VRAM (desperdicia BW)
+    ❌ Dejar batch=32 en H200 (deja 95%+ de Tensor Cores ociosos)
+    ❌ Usar float32 en operaciones de norma (2× más lento que BF16 en SM90)
+    ❌ Usar dynamic shapes con CUDA Graphs (capture fallará)
+    ❌ Interpretar GPU-util alto + wattage bajo como "funcionando bien"
+
+8.4 El Perfil de Hardware Ideal para Cada Modelo
+──────────────────────────────────────────────────
+    < 500M params (125M, 350M):    H200 MUY aprovechado solo con batch >= 128
+    500M - 3B params:              H200 bien aprovechado con batch >= 32
+    > 3B params:                   H200 aprovechado incluso con batch=1 (VRAM full)
+    Inferencia LLM serving 7B+:    H200 ideal (VRAM + BW de HBM3e)
+    Inferencia LLM serving 1-3B:   H100 es suficiente, H200 overkill
+    Multi-GPU training (tensor||): H200 NVL mejor que SXM para sharding
+
+================================================================================
+RESUMEN EJECUTIVO
+================================================================================
+
+La H200 en nuestro pod tenía:
+  • Software DIFERENTE al anunciado (PyTorch 2.10 ≠ 2.6 anunciado)
+  • 143 GiB VRAM pero el entrenamiento usó apenas 2.1 GiB (1.5%)
+  • 700W TDP pero consumió solo 415W (59%)
+  • 989 TFLOPs BF16 disponibles pero solo usamos 56.7 TFLOPs (5.7% MFU)
+
+LA GPU ERA MÁS QUE SUFICIENTE — EL BOTTLENECK FUE LA CONFIGURACIÓN:
+  Batch demasiado pequeño (32 vs óptimo 256)
+  + no HBM dataset
+  + no CUDA Graphs
+  = 3.5-4× throughput dejado sobre la mesa
+
+La arquitectura CHIMERA también contribuye (~40% del déficit):
+  recurrencia SSM inherentemente BW-bound, TTT inner loop costoso,
+  bus async entre capas, switching overhead
+
+Con la combinación correcta de:
+  (a) configuración de entrenamiento optimizada
+  (b) arquitectura simplificada/fusionada (próximo paso)
+→ Target alcanzable: 15-20% MFU, ~4-5h para 2.6B tokens en H200.
+
+================================================================================
+FIN DEL ANÁLISIS
+Checkpoint disponible: /home/OrthoSSM/chimera_h200/checkpoints/step_0001000.pt
+================================================================================

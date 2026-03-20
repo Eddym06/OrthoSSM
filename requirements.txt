@@ -1,0 +1,5 @@
+torch>=2.8.0
+triton>=3.4.0
+transformers>=4.38.0
+tokenizers>=0.15.0
+datasets>=2.16.0

@@ -1,0 +1,91 @@
+🖥️  Detectados 128 vCPUs disponibles
+✅ tokenizers (Rust-backed) disponible
+======================================================================
+  COEUS POST-PROCESO — Benchmark + Edge + Estado
+======================================================================
+
+  ✅ tokenizer.json cargado — vocab_size: 131,072
+
+  🧪 Test rápido de tokenización:
+    'Hello, world!'                                    → 8 tokens: ['<|bos|>', 'Hello', ',', 'Ġw', 'or', 'ld', '!', '<|eos|>']
+    '2 + 2 = 4'                                        → 11 tokens: ['<|bos|>', '2', 'Ġ', '+', 'Ġ', '2', 'Ġ', '=']
+    'def fibonacci(n): return n if n <= 1 else fi      → 28 tokens: ['<|bos|>', 'def', 'Ġfibonacci', '(n', '):', 'Ġ', 'return', 'Ġn']
+    'Привет мир'                                       → 9 tokens: ['<|bos|>', 'ÐŁ', 'ÑĢÐ¸', 'Ð²', 'ÐµÑĤ', 'ĠÐ¼', 'Ð¸', 'ÑĢ']
+    '日本語テスト'                                           → 8 tokens: ['<|bos|>', 'æĹ¥æľ¬', 'èªŀ', 'ãĥ', 'Ĩ', 'ãĤ¹', 'ãĥĪ', '<|eos|>']
+    'x = 3.14159e-10'                                  → 16 tokens: ['<|bos|>', 'x', 'Ġ', '=', 'Ġ', '3', '.', '1']
+
+======================================================================
+  BENCHMARK: COEUS vs COMPETIDORES
+======================================================================
+
+══════════════════════════════════════════════════════════════════════
+  COEUS BENCHMARK ENGINE — Comparación Multi-Tokenizer
+══════════════════════════════════════════════════════════════════════
+
+  📊 Benchmarking COEUS...
+
+  🛡️ Tests adversariales...
+
+══════════════════════════════════════════════════════════════════════════════════════════
+  REPORTE COMPARATIVO DE TOKENIZADORES
+══════════════════════════════════════════════════════════════════════════════════════════
+  Dominio              |        COEUS
+  ───────────────────────────────────
+  chinese              |        1.93x
+  electronics          |        2.23x
+  japanese             |        1.00x
+  korean               |        0.62x
+  latex_math           |        2.80x
+  mixed_code_prose     |        2.29x
+  python_code          |        3.06x
+  rust_code            |        2.71x
+  spanish_technical    |        2.20x
+  ───────────────────────────────────
+  PROMEDIO GLOBAL      |        2.27x
+
+  (mayor = mejor compresión)
+══════════════════════════════════════════════════════════════════════════════════════════
+
+  🛡️ TESTS DE ROBUSTEZ:
+    ✅ homoglyphs           →    7 tokens, roundtrip=OK
+    ✅ zero_width           →    7 tokens, roundtrip=OK
+    ⚠️ rtl_injection        →    8 tokens, roundtrip=FAIL
+    ⚠️ combining_chars      →    3 tokens, roundtrip=FAIL
+    ⚠️ emoji_sequences      →   31 tokens, roundtrip=FAIL
+    ✅ null_bytes           →    3 tokens, roundtrip=OK
+    ✅ extreme_repeats      →  125 tokens, roundtrip=OK
+    ✅ mixed_scripts        →   22 tokens, roundtrip=OK
+
+======================================================================
+  OPTIMIZACIÓN EDGE AI
+======================================================================
+
+  📱 ESTIMACIÓN DE RENDIMIENTO EN EDGE:
+     Vocab size:       131,072
+     Embedding (fp32): 0.40 GB
+     Embedding (int8): 0.10 GB
+
+     ✅ NVIDIA Jetson Orin Nano (8GB)
+        RAM: 8GB | ~50,000 tok/s | ~0.5ms latencia
+     ✅ Raspberry Pi 5 (8GB)
+        RAM: 8GB | ~5,000 tok/s | ~5.0ms latencia
+     ✅ Smartphone (6GB)
+        RAM: 6GB | ~20,000 tok/s | ~1.0ms latencia
+     ✅ Apple M-series (16GB)
+        RAM: 16GB | ~200,000 tok/s | ~0.1ms latencia
+     ✅ Cloud GPU (A100 80GB)
+        RAM: 80GB | ~1,000,000 tok/s | ~0.02ms latencia
+  ⚠️  Ejecuta analyze_vocab_usage() primero
+  ✅ tokenizer_edge generado (32K vocab)
+
+  ✅ coeus_system_state.json guardado
+
+======================================================================
+  Archivos en /workspace/coeus_tokenizer_trained:
+    _training_chunks/
+    coeus_system_state.json                        0.7 KB
+    tokenizer.json                                 9.5 MB
+
+======================================================================
+  ✅ POST-PROCESO COMPLETADO
+======================================================================

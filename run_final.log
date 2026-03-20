@@ -1,0 +1,5 @@
+Initializing ADVANCED Mamba 2 CHIMERA...
+Forward + Backward Pass (w/ Auto-TTT proxy) Works! Shape: torch.Size([2, 512, 256])
+Time taken: 101346.99 ms
+Router probabilities: [0.29778024554252625, 0.38555294275283813, 0.3166668117046356]
+SUCCESS: Multi-scale A init, SLR Module, and Predictive TTT integrated over Official Mamba 2.

@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/home/OrthoSSM/chimera_experiment/official_chimera.py", line 5, in <module>
+    from mamba_ssm import Mamba2
+ModuleNotFoundError: No module named 'mamba_ssm'

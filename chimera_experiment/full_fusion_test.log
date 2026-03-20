@@ -1,0 +1,10 @@
+Initializing ADVANCED Mamba 2 CHIMERA...
+Forward + Backward Works! Shape: torch.Size([2, 512, 256])
+Bus cache: torch.Size([2, 1, 128])
+Time: 11615.04 ms
+Router probabilities (FAST/HYBRID/FULL): ['0.320', '0.362', '0.318']
+SGR top-K fraction: 12.5%  (64/512 tokens)
+λ differential V2: 0.1192
+SLR merge gate: 0.5000
+LandmarkArchive: {'n_landmarks': 1, 'max_landmarks': 64, 'landmark_dim': 128, 'cache_valid': True, 'memory_kb': 0.5}
+SUCCESS: Mamba2 + Multi-scale A + TTT-Lite + SGR + SLR-V2(Triton) + AsyncLightBus(128d) + NativeLandmarkArchive

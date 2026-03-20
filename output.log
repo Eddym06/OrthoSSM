@@ -1,0 +1,9 @@
+
+--- Benchmarking CHIMERA ---
+B=2, S=4096, D=256
+Latency (avg over 10): 211.87 ms
+Peak VRAM: 3356.81 MB
+
+--- Analisis interno ---
+Router probabilities (batch 0): [0.33595579862594604, 0.3287166655063629, 0.33532753586769104]
+El TTT-lite se ha simulado sobre dt_bias (Lion optimizer implementado inline en '_ssd_parallel_scan_ttt').

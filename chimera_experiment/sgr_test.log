@@ -1,0 +1,7 @@
+=== SGR + DiffAttn V2 + RMSNorm (Triton) ===
+[OK] torch.Size([2, 512, 256]) → torch.Size([2, 512, 256])
+[OK] Top-K: 64/512 (12.5%)
+[OK] λ: 0.1192
+[OK] gate: 0.5000
+[OK] 1866.14 ms
+[SUCCESS] V2 DiffAttn con dos softmaxes Triton independientes OK
